@@ -10,11 +10,15 @@ COMPRESSION_THRESHOLD: float = 1.0
 
 def logsubexp(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     """Compute log(exp(x) - exp(y)) in a numerically stable way."""
-    val = -np.exp(np.minimum(y - x, 0.0))
-    mask = val > -1.0
-    val[mask] = x[mask] + np.log1p(val[mask])
-    val[~mask] = -np.inf
-    return val
+    array1 = y - x
+    mask1 = array1 < 0.0
+    array2 = -np.exp(array1[mask1])
+    mask2 = array2 > -1.0
+    array2[mask2] = np.log1p(array2[mask2])
+    array2[~mask2] = -np.inf
+    array1[mask1] = array2 + x[mask1]
+    array1[~mask1] = -np.inf
+    return array1
 
 
 class Kernel:
