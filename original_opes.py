@@ -10,7 +10,7 @@ COMPRESSION_THRESHOLD: float = 1.0
 
 def logsubexp(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     """Compute log(exp(x) - exp(y)) in a numerically stable way."""
-    val = -np.exp(y - x)
+    val = -np.exp(np.minimum(y - x, 0.0))
     mask = val > -1.0
     val[mask] = x[mask] + np.log1p(val[mask])
     val[~mask] = -np.inf

@@ -134,8 +134,8 @@ class KernelDensityEstimate:
         if np.any(indices < 0) or np.any(indices >= self.shape):
             return
         self.logSumWID = np.logaddexp(self.logSumWID, logWeight)
-        density = self.logAccGaussian[tuple(reversed(indices))] - self.logSumW
-        self.logAccInvDens = np.logaddexp(self.logAccInvDens, logWeight - density)
+        logDensity = self.logAccGaussian[tuple(reversed(indices))] - self.logSumW
+        self.logAccInvDens = np.logaddexp(self.logAccInvDens, logWeight - logDensity)
 
 
 class OPES:
@@ -300,7 +300,7 @@ class OPES:
         collective variables.  The values are in kJ/mole.  The i'th position along an
         axis corresponds to minValue + i*(maxValue-minValue)/gridWidth.
         """
-        if not self.exploreMode or reweighted:
+        if reweighted or not self.exploreMode:
             return -self._kbt * self._rwKDE.getLogPDF()
         biasedFreeEnergy = -self._kbt * self._KDE.getLogPDF()
         if original:

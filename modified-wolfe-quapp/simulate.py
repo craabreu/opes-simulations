@@ -93,12 +93,11 @@ def run_opes(index: int, method: str, nstep: int, original: bool):
     context.setVelocitiesToTemperature(temperature)
 
     num_cycles = nstep // pace
-    filename = f"{method}_{index:02d}.csv"
-    if original:
-        filename = f"original-{filename}"
+    filename = ("original-" if original else "") + f"{method}_{index:02d}.csv"
     percentage = 0
     n = 75
     z = 0
+    var = sigma**2
     with open(filename, "w", encoding="utf-8") as file:
         file.write("step,x,y,variance,delta_f,z\n")
         print("step, x, y, variance, delta_f, z, percentage")
@@ -107,15 +106,24 @@ def run_opes(index: int, method: str, nstep: int, original: bool):
             state = context.getState(getPositions=True)
             positions = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
             x, y, _ = positions.flatten()
-            var = sigma**2 if method == "metad" else sampler.getVariance().item()
-            fes = sampler.getFreeEnergy()
+            fes = sampler.getFreeEnergy() / unit.kilojoules_per_mole
             delta_f = np.logaddexp.reduce(-fes[:n]) - np.logaddexp.reduce(-fes[n:])
             if method != "metad":
                 z = sampler.getAverageDensity()
+                var = sampler.getVariance().item()
             write(file, cycle * pace, *map(np.float32, [x, y, var, delta_f, z]))
             if (cycle + 1) % (num_cycles // 100) == 0:
                 percentage += 1
                 print(index, cycle + 1, x, y, var, delta_f, z, f"{percentage}%")
+
+    filename = ("original-" if original else "") + f"{method}_profile_{index:02d}.csv"
+    fes = sampler.getFreeEnergy() / unit.kilojoules_per_mole
+    fes -= fes.min()
+    with open(filename, "w", encoding="utf-8") as file:
+        file.write("x,fes\n")
+        for x, f in zip(sampler._grid[0], fes):
+            write(file, x, f)
+
 
 
 if __name__ == "__main__":
