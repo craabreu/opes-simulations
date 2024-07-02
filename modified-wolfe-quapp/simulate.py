@@ -6,14 +6,15 @@ import numpy as np
 import openmm as mm
 from openmm import app, unit
 
-from openmmopes import OPES
+from openmmopes import OPES as OpenMMOPES
+from original_opes import OPES as OriginalOPES
 
 
 def write(file, *args):
     file.write(",".join([str(x) for x in args]) + "\n")
 
 
-def run_opes(index: int, method: str, nstep: int = 200000000) -> None:
+def run_opes(index: int, method: str, nstep: int, original: bool):
 
     if method not in ["metad", "opes", "opes-explore"]:
         raise ValueError("Invalid method")
@@ -41,7 +42,7 @@ def run_opes(index: int, method: str, nstep: int = 200000000) -> None:
 
     height = 1
     pace = 500
-    sigma = 0.1
+    sigma = 0.185815
     bias_factor = 10
     variance_pace = 25
 
@@ -64,7 +65,7 @@ def run_opes(index: int, method: str, nstep: int = 200000000) -> None:
 
     explore = method == "opes-explore"
     if method.startswith("opes"):
-        sampler = OPES(
+        sampler = (OriginalOPES if original else OpenMMOPES)(
             system,
             [bias_variable],
             temperature,
@@ -93,6 +94,8 @@ def run_opes(index: int, method: str, nstep: int = 200000000) -> None:
 
     num_cycles = nstep // pace
     filename = f"{method}_{index:02d}.csv"
+    if original:
+        filename = f"original-{filename}"
     percentage = 0
     n = 75
     z = 0
@@ -108,7 +111,7 @@ def run_opes(index: int, method: str, nstep: int = 200000000) -> None:
             fes = sampler.getFreeEnergy()
             delta_f = np.logaddexp.reduce(-fes[:n]) - np.logaddexp.reduce(-fes[n:])
             if method != "metad":
-                z = np.exp(-sampler._KDE.getLogMeanInvDensity().item())
+                z = sampler.getAverageDensity()
             write(file, cycle * pace, *map(np.float32, [x, y, var, delta_f, z]))
             if (cycle + 1) % (num_cycles // 100) == 0:
                 percentage += 1
@@ -119,18 +122,26 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run OPES workflow")
     parser.add_argument("method", type=str, help="Method to use in the workflow")
     parser.add_argument(
-        "--steps", type=int, default=200000000, help="Number of steps to run"
+        "--steps", type=int, default=20000000, help="Number of steps to run"
     )
     parser.add_argument(
         "--np", type=int, default=1, help="Total number of parallel processes"
     )
+    parser.add_argument(
+        "--i0", type=int, default=0, help="Index of the first parallel process"
+    )
+    parser.add_argument(
+        "--original", action="store_true", help="Use the original OPES algorithm"
+    )
     args = parser.parse_args()
 
     if args.np == 1:
-        run_opes(0, args.method, args.steps)
+        run_opes(0, args.method, args.steps, args.original)
     else:
-        parallel_run_opes = partial(run_opes, method=args.method, nstep=args.steps)
+        parallel_run_opes = partial(
+            run_opes, method=args.method, nstep=args.steps, original=args.original
+        )
         with mp.Pool(processes=args.np) as pool:
-            pool.map(parallel_run_opes, range(args.np))
+            pool.map(parallel_run_opes, range(args.i0, args.i0 + args.np))
 
     print("Done!")
