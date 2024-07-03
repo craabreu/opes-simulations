@@ -44,7 +44,7 @@ def run_opes(index: int, method: str, nstep: int, original: bool):
     pace = 500
     sigma = 0.185815
     bias_factor = 10
-    variance_pace = 25
+    variance_pace = 1
 
     grid_min = -3
     grid_max = 3

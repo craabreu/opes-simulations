@@ -306,6 +306,19 @@ class OPESForce(mm.CustomCVForce):
         state = context.getState(getEnergy=True, groups={self.getForceGroup()})
         return state.getPotentialEnergy()
 
+    def getBias(self, logP: np.ndarray, logZ: float) -> np.ndarray:
+        """
+        Get the bias potential.
+
+        Parameters
+        ----------
+        logP
+            The values of the bias potential.
+        logZ
+            The logarithm of the partition function.
+        """
+        return self._prefactor * np.logaddexp(logP - logZ, self._logEpsilon)
+
     def update(self, logP: np.ndarray, logZ: float, context: mm.Context) -> None:
         """
         Update the tabulated function with new values of the bias potential.
@@ -320,9 +333,7 @@ class OPESForce(mm.CustomCVForce):
             The Context in which to apply the bias.
         """
         self._table.setFunctionParameters(
-            *self._widths,
-            self._prefactor * np.logaddexp(logP - logZ, self._logEpsilon).flatten(),
-            *self._limits,
+            *self._widths, self.getBias(logP, logZ).flatten(), *self._limits
         )
         self.updateParametersInContext(context)
 
@@ -408,7 +419,7 @@ class OPES:  # pylint: disable=too-many-instance-attributes
 
         self._log_acc_inv_density = -np.inf
 
-    def getFreeEnergy(self, corrected=False) -> unit.Quantity:
+    def getFreeEnergy(self, corrected=True) -> unit.Quantity:
         """
         Get the free energy of the system as a function of the collective variables.
 
@@ -421,10 +432,9 @@ class OPES:  # pylint: disable=too-many-instance-attributes
             if corrected:
                 log_pk, log_pg = self._logPKernels, self._logPGrid
                 log_z = np.logaddexp.reduce(log_pk) - np.log(len(self._kernels))
-                bias = (
-                    self._prefactor * np.logaddexp(log_pg - log_z, self._logEpsilon),
+                free_energy -= (
+                    self._force.getBias(log_pg, log_z) * unit.kilojoules_per_mole
                 )
-                free_energy -= bias
             else:
                 free_energy *= self._bias_factor
         return free_energy
