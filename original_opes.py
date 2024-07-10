@@ -5,19 +5,20 @@ import numpy as np
 import openmm as mm
 from openmm import app, unit
 
+
 COMPRESSION_THRESHOLD: float = 1.0
+FINITE_SUPPORT: bool = True
 
 
 def logsubexp(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     """Compute log(exp(x) - exp(y)) in a numerically stable way."""
-    array1 = y - x
-    mask1 = array1 < 0.0
-    array2 = -np.exp(array1[mask1])
+    array1 = np.full_like(x, -np.inf)
+    mask1 = y < x
+    array2 = -np.exp(y[mask1] - x[mask1])
     mask2 = array2 > -1.0
     array2[mask2] = np.log1p(array2[mask2])
     array2[~mask2] = -np.inf
     array1[mask1] = array2 + x[mask1]
-    array1[~mask1] = -np.inf
     return array1
 
 
@@ -72,8 +73,11 @@ class Kernel:
         if np.any(self.bandwidth == 0):
             return -np.inf
         ndims = len(self.bandwidth)
-        log2pi = np.log(2 * np.pi)
-        log_height = self.logWeight - ndims * log2pi / 2 - np.log(self.bandwidth).sum()
+        log_height = self.logWeight - np.log(self.bandwidth).sum()
+        if FINITE_SUPPORT:
+            log_height += ndims * (np.log(35) - np.log(559872))
+        else:
+            log_height -= ndims * np.log(2 * np.pi) / 2
         return log_height
 
     def _squareMahalanobisDistances(self, points: np.ndarray) -> np.ndarray:
@@ -176,6 +180,14 @@ class Kernel:
         self.bandwidth = np.sqrt(mean_squared_bandwidth + w1 * w2 * displacement**2)
         self.logHeight = self._computeLogHeight()
 
+    @staticmethod
+    def _finiteSupportLogs(x: np.ndarray) -> np.ndarray:
+        values = 9 - x**2
+        mask = values > 0
+        values[mask] = 4 * np.log(values[mask])
+        values[~mask] = -np.inf
+        return values
+
     def evaluate(self, points: np.ndarray) -> t.Union[float, np.ndarray]:
         """
         Compute the natural logarithm of the kernel evaluated at the given point or
@@ -193,6 +205,10 @@ class Kernel:
         float
             The logarithm of the kernel evaluated at the given point or points.
         """
+        if FINITE_SUPPORT:
+            return self.logHeight + self._finiteSupportLogs(
+                self.displacement(points) / self.bandwidth
+            ).sum(axis=-1)
         return self.logHeight - 0.5 * self._squareMahalanobisDistances(points)
 
     def evaluateOnGrid(self, gridMarks: t.Sequence[np.ndarray]) -> np.ndarray:
@@ -220,10 +236,16 @@ class Kernel:
             for dim, length in zip(self._pdims, self._lengths):
                 distances[dim] -= length * np.round(distances[dim] / length)
                 distances[dim][-1] = distances[dim][0]
-        exponents = [
-            -0.5 * (distance / sigma) ** 2
-            for distance, sigma in zip(distances, self.bandwidth)
-        ]
+        if FINITE_SUPPORT:
+            exponents = [
+                self._finiteSupportLogs(distance / sigma)
+                for distance, sigma in zip(distances, self.bandwidth)
+            ]
+        else:
+            exponents = [
+                -0.5 * (distance / sigma) ** 2
+                for distance, sigma in zip(distances, self.bandwidth)
+            ]
         return self.logHeight + reduce(np.add.outer, reversed(exponents))
 
 
@@ -447,11 +469,12 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         """
         Get the average density of the system as a function of the collective variables.
         """
-        return np.exp(
-            np.logaddexp.reduce(self._logPKernels)
-            - np.log(len(self._kernels))
-            - self._logSumWeights
-        )
+        # return np.exp(
+        #     np.logaddexp.reduce(self._logPKernels)
+        #     - np.log(len(self._kernels))
+        #     - self._logSumWeights
+        # )
+        return np.exp(self._logSumWeights - self._log_acc_inv_density)
 
     def getCollectiveVariables(self, simulation: app.Simulation) -> t.Tuple[float, ...]:
         """
@@ -574,8 +597,16 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         else:
             self._kernels = [new_kernel]
             log_pg = new_kernel.evaluateOnGrid(self._grid)
-            log_pk = np.array([new_kernel.logHeight])
+            log_pk = log_p_new = np.array([new_kernel.logHeight])
+
+        log_density = np.logaddexp.reduce(log_p_new) - self._logSumWeights
+        self._log_acc_inv_density = np.logaddexp(
+            self._log_acc_inv_density, log_weight - log_density
+        )
 
         log_z = np.logaddexp.reduce(log_pk) - np.log(len(self._kernels))
+        # log_z = 2 * self._logSumWeights - self._log_acc_inv_density
+        # print(type(log_z))
+        # print(log_z, 2 * self._logSumWeights - self._log_acc_inv_density)
         self._force.update(log_pg, log_z, context)
         self._logPKernels, self._logPGrid = log_pk, log_pg
