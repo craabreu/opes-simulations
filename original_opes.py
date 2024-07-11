@@ -7,7 +7,7 @@ from openmm import app, unit
 
 
 COMPRESSION_THRESHOLD: float = 1.0
-FINITE_SUPPORT: bool = True
+FINITE_SUPPORT: bool = False
 
 
 def logsubexp(x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -469,11 +469,16 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         """
         Get the average density of the system as a function of the collective variables.
         """
-        # return np.exp(
-        #     np.logaddexp.reduce(self._logPKernels)
-        #     - np.log(len(self._kernels))
-        #     - self._logSumWeights
-        # )
+        return np.exp(
+            np.logaddexp.reduce(self._logPKernels)
+            - np.log(len(self._kernels))
+            - self._logSumWeights
+        )
+
+    def getInvAverageInvDensity(self) -> unit.Quantity:
+        """
+        Get the average density of the system as a function of the collective variables.
+        """
         return np.exp(self._logSumWeights - self._log_acc_inv_density)
 
     def getCollectiveVariables(self, simulation: app.Simulation) -> t.Tuple[float, ...]:
@@ -606,7 +611,5 @@ class OPES:  # pylint: disable=too-many-instance-attributes
 
         log_z = np.logaddexp.reduce(log_pk) - np.log(len(self._kernels))
         # log_z = 2 * self._logSumWeights - self._log_acc_inv_density
-        # print(type(log_z))
-        # print(log_z, 2 * self._logSumWeights - self._log_acc_inv_density)
         self._force.update(log_pg, log_z, context)
         self._logPKernels, self._logPGrid = log_pk, log_pg

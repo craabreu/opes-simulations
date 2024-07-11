@@ -9,6 +9,8 @@ from openmm import app, unit
 from openmmopes import OPES as OpenMMOPES
 from original_opes import OPES as OriginalOPES
 
+# from new_opes import OPES as OriginalOPES
+
 
 def write(file, *args):
     file.write(",".join([str(x) for x in args]) + "\n")
@@ -96,11 +98,11 @@ def run_opes(index: int, method: str, nstep: int, original: bool):
     filename = ("original-" if original else "") + f"{method}_{index:02d}.csv"
     percentage = 0
     n = 75
-    z = 0
+    z = znew = 0
     var = sigma**2
     with open(filename, "w", encoding="utf-8") as file:
-        file.write("step,x,y,variance,delta_f,z\n")
-        print("step, x, y, variance, delta_f, z, percentage")
+        file.write("step,x,y,variance,delta_f,z,znew\n")
+        print("step, x, y, variance, delta_f, z, znew, percentage")
         for cycle in range(num_cycles):
             sampler.step(simulation, pace)
             state = context.getState(getPositions=True)
@@ -110,11 +112,12 @@ def run_opes(index: int, method: str, nstep: int, original: bool):
             delta_f = np.logaddexp.reduce(-fes[:n]) - np.logaddexp.reduce(-fes[n:])
             if method != "metad":
                 z = sampler.getAverageDensity()
+                znew = sampler.getInvAverageInvDensity()
                 var = sampler.getVariance().item()
-            write(file, cycle * pace, *map(np.float32, [x, y, var, delta_f, z]))
+            write(file, cycle * pace, *map(np.float32, [x, y, var, delta_f, z, znew]))
             if (cycle + 1) % (num_cycles // 100) == 0:
                 percentage += 1
-                print(index, cycle + 1, x, y, var, delta_f, z, f"{percentage}%")
+                print(index, cycle + 1, x, y, var, delta_f, z, znew, f"{percentage}%")
 
     filename = ("original-" if original else "") + f"{method}_profile_{index:02d}.csv"
     fes = sampler.getFreeEnergy() / unit.kilojoules_per_mole
@@ -125,12 +128,11 @@ def run_opes(index: int, method: str, nstep: int, original: bool):
             write(file, x, f)
 
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run OPES workflow")
     parser.add_argument("method", type=str, help="Method to use in the workflow")
     parser.add_argument(
-        "--steps", type=int, default=20000000, help="Number of steps to run"
+        "--steps", type=int, default=30000000, help="Number of steps to run"
     )
     parser.add_argument(
         "--np", type=int, default=1, help="Total number of parallel processes"
