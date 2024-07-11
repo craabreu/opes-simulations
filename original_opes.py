@@ -1,16 +1,15 @@
-import typing as t
 from functools import reduce
 
 import numpy as np
 import openmm as mm
-from openmm import app, unit
+from openmm import unit
 
 
-COMPRESSION_THRESHOLD: float = 1.0
-FINITE_SUPPORT: bool = False
+COMPRESSION_THRESHOLD = 1.0
+FINITE_SUPPORT = False
 
 
-def logsubexp(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+def logsubexp(x, y):
     """Compute log(exp(x) - exp(y)) in a numerically stable way."""
     array1 = np.full_like(x, -np.inf)
     mask1 = y < x
@@ -39,23 +38,17 @@ class Kernel:
 
     Attributes
     ----------
-    position : np.ndarray
+    position
         The point in space where the kernel is centered.
-    bandwidth : np.ndarray
+    bandwidth
         The bandwidth (standard deviation) of the kernel in each direction.
-    logWeight : float
+    logWeight
         The logarithm of the weight assigned to the kernel.
-    logHeight : float
+    logHeight
         The logarithm of the kernel's height.
     """
 
-    def __init__(
-        self,
-        variables: t.Sequence[app.BiasVariable],
-        position: t.Sequence[float],
-        bandwidth: t.Sequence[float],
-        logWeight: float,
-    ) -> None:
+    def __init__(self, variables, position, bandwidth, logWeight):
         ndims = len(variables)
         assert len(position) == len(bandwidth) == ndims
         self.position = np.asarray(position)
@@ -69,7 +62,7 @@ class Kernel:
             self._lengths = ubounds - self._lbounds
         self.logHeight = self._computeLogHeight()
 
-    def _computeLogHeight(self) -> float:
+    def _computeLogHeight(self):
         if np.any(self.bandwidth == 0):
             return -np.inf
         ndims = len(self.bandwidth)
@@ -80,10 +73,10 @@ class Kernel:
             log_height -= ndims * np.log(2 * np.pi) / 2
         return log_height
 
-    def _squareMahalanobisDistances(self, points: np.ndarray) -> np.ndarray:
+    def _squareMahalanobisDistances(self, points):
         return np.square(self.displacement(points) / self.bandwidth).sum(axis=-1)
 
-    def displacement(self, endpoint: np.ndarray) -> np.ndarray:
+    def displacement(self, endpoint):
         """
         Compute the displacement vector from the kernel's position to a given endpoint,
         taking periodicity into account.
@@ -105,7 +98,7 @@ class Kernel:
             )
         return disp
 
-    def endpoint(self, displacement: np.ndarray) -> np.ndarray:
+    def endpoint(self, displacement):
         """
         Compute the endpoint of a displacement vector from the kernel's position
 
@@ -126,9 +119,7 @@ class Kernel:
             )
         return end
 
-    def findNearest(
-        self, points: np.ndarray, ignore: t.Sequence[int] = ()
-    ) -> t.Tuple[int, float]:
+    def findNearest(self, points, ignore=()):
         """
         Given a list of points in space, return the index of the nearest one and the
         squared Mahalanobis distance to it. Optionally ignore some points.
@@ -158,7 +149,7 @@ class Kernel:
         index = np.argmin(sq_mahalanobis_distances)
         return index, sq_mahalanobis_distances[index]
 
-    def merge(self, other: "Kernel") -> None:
+    def merge(self, other):
         """
         Change this kernel by merging it with another one.
 
@@ -181,14 +172,14 @@ class Kernel:
         self.logHeight = self._computeLogHeight()
 
     @staticmethod
-    def _finiteSupportLogs(x: np.ndarray) -> np.ndarray:
+    def _finiteSupportLogs(x):
         values = 9 - x**2
         mask = values > 0
         values[mask] = 4 * np.log(values[mask])
         values[~mask] = -np.inf
         return values
 
-    def evaluate(self, points: np.ndarray) -> t.Union[float, np.ndarray]:
+    def evaluate(self, points):
         """
         Compute the natural logarithm of the kernel evaluated at the given point or
         points.
@@ -211,7 +202,7 @@ class Kernel:
             ).sum(axis=-1)
         return self.logHeight - 0.5 * self._squareMahalanobisDistances(points)
 
-    def evaluateOnGrid(self, gridMarks: t.Sequence[np.ndarray]) -> np.ndarray:
+    def evaluateOnGrid(self, gridMarks):
         """
         Compute the natural logarithms of the kernel evaluated on a rectilinear grid.
 
@@ -272,12 +263,7 @@ class OPESForce(mm.CustomCVForce):
         If all 32 force groups in the system are already in use.
     """
 
-    def __init__(
-        self,
-        variables: t.Sequence[app.BiasVariable],
-        barrier: unit.Quantity,
-        prefactor: unit.Quantity,
-    ) -> None:
+    def __init__(self, variables, barrier, prefactor):
         barrier = barrier.value_in_unit(unit.kilojoules_per_mole)
         prefactor = prefactor.value_in_unit(unit.kilojoules_per_mole)
         num_vars = len(variables)
@@ -301,7 +287,7 @@ class OPESForce(mm.CustomCVForce):
             self.addCollectiveVariable(name, var.force)
         self.addTabulatedFunction("table", self._table)
 
-    def setUniqueForceGroup(self, system: mm.System) -> int:
+    def setUniqueForceGroup(self, system):
         """
         Set the force group to the unused group with the highest index in the system.
 
@@ -320,7 +306,7 @@ class OPESForce(mm.CustomCVForce):
             raise RuntimeError("All 32 force groups are already in use.")
         self.setForceGroup(max(free_groups))
 
-    def getEnergy(self, context: mm.Context) -> float:
+    def getEnergy(self, context):
         """
         Get the energy of the bias potential.
 
@@ -332,7 +318,7 @@ class OPESForce(mm.CustomCVForce):
         state = context.getState(getEnergy=True, groups={self.getForceGroup()})
         return state.getPotentialEnergy()
 
-    def getBias(self, logP: np.ndarray, logZ: float) -> np.ndarray:
+    def getBias(self, logP, logZ):
         """
         Get the bias potential.
 
@@ -345,7 +331,7 @@ class OPESForce(mm.CustomCVForce):
         """
         return self._prefactor * np.logaddexp(logP - logZ, self._logEpsilon)
 
-    def update(self, logP: np.ndarray, logZ: float, context: mm.Context) -> None:
+    def update(self, logP, logZ, context):
         """
         Update the tabulated function with new values of the bias potential.
 
@@ -396,14 +382,14 @@ class OPES:  # pylint: disable=too-many-instance-attributes
 
     def __init__(
         self,
-        system: mm.System,
-        variables: t.Sequence[app.BiasVariable],
-        temperature: unit.Quantity,
-        barrier: unit.Quantity,
-        frequency: int,
-        exploreMode: bool = False,
-        varianceFrequency: bool = None,
-    ) -> None:
+        system,
+        variables,
+        temperature,
+        barrier,
+        frequency,
+        exploreMode,
+        varianceFrequency,
+    ):
         if not unit.is_quantity(temperature):
             temperature *= unit.kelvin
         if not unit.is_quantity(barrier):
@@ -445,7 +431,7 @@ class OPES:  # pylint: disable=too-many-instance-attributes
 
         self._log_acc_inv_density = -np.inf
 
-    def getFreeEnergy(self, corrected=True) -> unit.Quantity:
+    def getFreeEnergy(self, corrected=True):
         """
         Get the free energy of the system as a function of the collective variables.
 
@@ -465,7 +451,7 @@ class OPES:  # pylint: disable=too-many-instance-attributes
                 free_energy *= self._bias_factor
         return free_energy
 
-    def getAverageDensity(self) -> unit.Quantity:
+    def getAverageDensity(self):
         """
         Get the average density of the system as a function of the collective variables.
         """
@@ -475,13 +461,13 @@ class OPES:  # pylint: disable=too-many-instance-attributes
             - self._logSumWeights
         )
 
-    def getInvAverageInvDensity(self) -> unit.Quantity:
+    def getInvAverageInvDensity(self):
         """
         Get the average density of the system as a function of the collective variables.
         """
         return np.exp(self._logSumWeights - self._log_acc_inv_density)
 
-    def getCollectiveVariables(self, simulation: app.Simulation) -> t.Tuple[float, ...]:
+    def getCollectiveVariables(self, simulation):
         """
         Get the current values of all collective variables in a Simulation.
 
@@ -492,7 +478,7 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         """
         return self._force.getCollectiveVariableValues(simulation.context)
 
-    def step(self, simulation: app.Simulation, steps: int) -> None:
+    def step(self, simulation, steps):
         """
         Advance the simulation by integrating a specified number of time steps.
 
@@ -515,7 +501,7 @@ class OPES:  # pylint: disable=too-many-instance-attributes
                 self._addKernel(values, simulation.context)
             steps -= next_steps
 
-    def setVariance(self, variance: np.ndarray) -> None:
+    def setVariance(self, variance):
         """
         Set the variance of the probability distribution estimate.
 
@@ -526,13 +512,13 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         """
         self._movingKernel.bandwidth = np.sqrt(variance)
 
-    def getVariance(self) -> np.ndarray:
+    def getVariance(self):
         """
         Get the variance of the probability distribution estimate.
         """
         return self._movingKernel.bandwidth**2
 
-    def _updateMovingKernel(self, values: t.Tuple[float, ...]) -> None:
+    def _updateMovingKernel(self, values):
         """
         Update the moving kernel used to estimate the bandwidth of the
 
@@ -551,7 +537,7 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         variance = (n - 1) * kernel.bandwidth**2 + delta
         kernel.bandwidth = np.sqrt(variance / n)
 
-    def _addKernel(self, values: t.Tuple[float, ...], context: mm.Context) -> None:
+    def _addKernel(self, values, context):
         """
         Add a kernel to the probability distribution estimate and update the bias
         potential.
