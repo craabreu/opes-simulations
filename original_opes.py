@@ -281,9 +281,13 @@ class OPESForce(mm.CustomCVForce):
             *self._limits,
             num_periodics == num_vars,
         )
+
+        self._logSumW = -np.inf
+        self._logSumWbyRho = -np.inf
+        self._logSumWK = np.full([cv.gridWidth for cv in reversed(variables)], -np.inf)
+
         var_names = [f"cv{i}" for i in range(len(variables))]
         logSumWK = mm.CustomCVForce(f"table({', '.join(var_names)})")
-        self.logSumW = -np.inf
         for name, var in zip(var_names, variables):
             logSumWK.addCollectiveVariable(name, var.force)
         logSumWK.addTabulatedFunction("table", self._table)
@@ -321,7 +325,7 @@ class OPESForce(mm.CustomCVForce):
         return force.getCollectiveVariableValues(innerContext)
 
     def getLocalDensity(self, context):
-        return super().getCollectiveVariableValues(context)[0] - self.logSumW
+        return super().getCollectiveVariableValues(context)[0] - self._logSumW
 
     def getEnergy(self, context):
         """
@@ -348,7 +352,7 @@ class OPESForce(mm.CustomCVForce):
         """
         return self._prefactor * np.logaddexp(logP - logZ, self._logEpsilon)
 
-    def update(self, logW, logP, logZ, context):
+    def update(self, logW, logP, context):
         """
         Update the tabulated function with new values of the bias potential.
 
@@ -361,13 +365,17 @@ class OPESForce(mm.CustomCVForce):
         context
             The Context in which to apply the bias.
         """
-        self.logSumW = np.logaddexp(self.logSumW, logW)
+        self._logSumW = np.logaddexp(self._logSumW, logW)
         innerContext = self.getInnerContext(context)
         force = innerContext.getSystem().getForce(0)
         force.getTabulatedFunction(0).setFunctionParameters(
             *self._widths, logP.ravel(), *self._limits
         )
         force.updateParametersInContext(innerContext)
+
+        log_density = self.getLocalDensity(context)
+        self._logSumWbyRho = np.logaddexp(self._logSumWbyRho, logW - log_density)
+        logZ = 2 * self._logSumW - self._logSumWbyRho
         context.setParameter("opesLogZ", logZ)
 
 
@@ -614,7 +622,7 @@ class OPES:  # pylint: disable=too-many-instance-attributes
 
         log_z = np.logaddexp.reduce(log_pk) - np.log(len(self._kernels))
         # log_z = 2 * self._logSumWeights - self._log_acc_inv_density
-        self._force.update(log_weight, log_pg, log_z, context)
+        self._force.update(log_weight, log_pg, context)
 
         # log_density = np.logaddexp.reduce(log_p_new) - self._logSumWeights
         log_density = self._force.getLocalDensity(context)
