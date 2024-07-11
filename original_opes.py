@@ -282,12 +282,19 @@ class OPESForce(mm.CustomCVForce):
             num_periodics == num_vars,
         )
         var_names = [f"cv{i}" for i in range(len(variables))]
-        sumWK = mm.CustomCVForce(f"table({', '.join(var_names)})")
+        logSumWK = mm.CustomCVForce(f"table({', '.join(var_names)})")
+        self.logSumW = -np.inf
         for name, var in zip(var_names, variables):
-            sumWK.addCollectiveVariable(name, var.force)
-        sumWK.addTabulatedFunction("table", self._table)
-        super().__init__("sumWK")
-        self.addCollectiveVariable("sumWK", sumWK)
+            logSumWK.addCollectiveVariable(name, var.force)
+        logSumWK.addTabulatedFunction("table", self._table)
+        super().__init__(
+            f"{self._prefactor}*logsumexp"
+            ";logsumexp=max(x,y)+log(1+exp(-abs(x-y)))"
+            ";x=logSumWK-opesLogZ"
+            f";y={self._logEpsilon}"
+        )
+        self.addCollectiveVariable("logSumWK", logSumWK)
+        self.addGlobalParameter("opesLogZ", 0.0)
 
     def setUniqueForceGroup(self, system):
         """
@@ -309,8 +316,12 @@ class OPESForce(mm.CustomCVForce):
         self.setForceGroup(max(free_groups))
 
     def getCollectiveVariableValues(self, context):
-        inner = self.getInnerContext(context)
-        return inner.getSystem().getForce(0).getCollectiveVariableValues(inner)
+        innerContext = self.getInnerContext(context)
+        force = innerContext.getSystem().getForce(0)
+        return force.getCollectiveVariableValues(innerContext)
+
+    def getLocalDensity(self, context):
+        return super().getCollectiveVariableValues(context)[0] - self.logSumW
 
     def getEnergy(self, context):
         """
@@ -337,7 +348,7 @@ class OPESForce(mm.CustomCVForce):
         """
         return self._prefactor * np.logaddexp(logP - logZ, self._logEpsilon)
 
-    def update(self, logP, logZ, context):
+    def update(self, logW, logP, logZ, context):
         """
         Update the tabulated function with new values of the bias potential.
 
@@ -350,12 +361,14 @@ class OPESForce(mm.CustomCVForce):
         context
             The Context in which to apply the bias.
         """
+        self.logSumW = np.logaddexp(self.logSumW, logW)
         innerContext = self.getInnerContext(context)
         force = innerContext.getSystem().getForce(0)
         force.getTabulatedFunction(0).setFunctionParameters(
-            *self._widths, self.getBias(logP, logZ).flatten(), *self._limits
+            *self._widths, logP.ravel(), *self._limits
         )
         force.updateParametersInContext(innerContext)
+        context.setParameter("opesLogZ", logZ)
 
 
 class OPES:  # pylint: disable=too-many-instance-attributes
@@ -574,6 +587,7 @@ class OPES:  # pylint: disable=too-many-instance-attributes
 
         log_pk, log_pg = self._logPKernels, self._logPGrid
         if self._kernels:
+            log_pg = np.logaddexp(log_pg, new_kernel.evaluateOnGrid(self._grid))
             points = np.stack([k.position for k in self._kernels])
             index, min_sq_dist = new_kernel.findNearest(points)
             to_remove = []
@@ -582,13 +596,13 @@ class OPES:  # pylint: disable=too-many-instance-attributes
                 new_kernel.merge(self._kernels[index])
                 index, min_sq_dist = new_kernel.findNearest(points, to_remove)
             log_pk = np.logaddexp(log_pk, new_kernel.evaluate(points))
-            log_pg = np.logaddexp(log_pg, new_kernel.evaluateOnGrid(self._grid))
+            # log_pg = np.logaddexp(log_pg, new_kernel.evaluateOnGrid(self._grid))
             if to_remove:
                 to_remove = sorted(to_remove, reverse=True)
                 for index in to_remove:
                     k = self._kernels.pop(index)
                     log_pk = logsubexp(log_pk, k.evaluate(points))
-                    log_pg = logsubexp(log_pg, k.evaluateOnGrid(self._grid))
+                    # log_pg = logsubexp(log_pg, k.evaluateOnGrid(self._grid))
                 log_pk = np.delete(log_pk, to_remove)
             self._kernels.append(new_kernel)
             log_p_new = [k.evaluate(new_kernel.position) for k in self._kernels]
@@ -598,12 +612,14 @@ class OPES:  # pylint: disable=too-many-instance-attributes
             log_pg = new_kernel.evaluateOnGrid(self._grid)
             log_pk = log_p_new = np.array([new_kernel.logHeight])
 
-        log_density = np.logaddexp.reduce(log_p_new) - self._logSumWeights
+        log_z = np.logaddexp.reduce(log_pk) - np.log(len(self._kernels))
+        # log_z = 2 * self._logSumWeights - self._log_acc_inv_density
+        self._force.update(log_weight, log_pg, log_z, context)
+
+        # log_density = np.logaddexp.reduce(log_p_new) - self._logSumWeights
+        log_density = self._force.getLocalDensity(context)
         self._log_acc_inv_density = np.logaddexp(
             self._log_acc_inv_density, log_weight - log_density
         )
 
-        log_z = np.logaddexp.reduce(log_pk) - np.log(len(self._kernels))
-        # log_z = 2 * self._logSumWeights - self._log_acc_inv_density
-        self._force.update(log_pg, log_z, context)
         self._logPKernels, self._logPGrid = log_pk, log_pg
