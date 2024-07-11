@@ -282,10 +282,12 @@ class OPESForce(mm.CustomCVForce):
             num_periodics == num_vars,
         )
         var_names = [f"cv{i}" for i in range(len(variables))]
-        super().__init__(f"table({', '.join(var_names)})")
+        sumWK = mm.CustomCVForce(f"table({', '.join(var_names)})")
         for name, var in zip(var_names, variables):
-            self.addCollectiveVariable(name, var.force)
-        self.addTabulatedFunction("table", self._table)
+            sumWK.addCollectiveVariable(name, var.force)
+        sumWK.addTabulatedFunction("table", self._table)
+        super().__init__("sumWK")
+        self.addCollectiveVariable("sumWK", sumWK)
 
     def setUniqueForceGroup(self, system):
         """
@@ -305,6 +307,10 @@ class OPESForce(mm.CustomCVForce):
         if not free_groups:
             raise RuntimeError("All 32 force groups are already in use.")
         self.setForceGroup(max(free_groups))
+
+    def getCollectiveVariableValues(self, context):
+        inner = self.getInnerContext(context)
+        return inner.getSystem().getForce(0).getCollectiveVariableValues(inner)
 
     def getEnergy(self, context):
         """
@@ -344,10 +350,12 @@ class OPESForce(mm.CustomCVForce):
         context
             The Context in which to apply the bias.
         """
-        self._table.setFunctionParameters(
+        innerContext = self.getInnerContext(context)
+        force = innerContext.getSystem().getForce(0)
+        force.getTabulatedFunction(0).setFunctionParameters(
             *self._widths, self.getBias(logP, logZ).flatten(), *self._limits
         )
-        self.updateParametersInContext(context)
+        force.updateParametersInContext(innerContext)
 
 
 class OPES:  # pylint: disable=too-many-instance-attributes
