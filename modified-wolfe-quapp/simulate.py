@@ -112,7 +112,7 @@ def run_opes(index: int, method: str, nstep: int, original: bool):
             delta_f = np.logaddexp.reduce(-fes[:n]) - np.logaddexp.reduce(-fes[n:])
             if method != "metad":
                 z = sampler.getAverageDensity()
-                znew = sampler.getInvAverageInvDensity()
+                # znew = sampler.getInvAverageInvDensity()
                 var = sampler.getVariance().item()
             write(file, cycle * pace, *map(np.float32, [x, y, var, delta_f, z, znew]))
             if (cycle + 1) % (num_cycles // 100) == 0:

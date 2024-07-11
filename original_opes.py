@@ -318,20 +318,7 @@ class OPESForce(mm.CustomCVForce):
         state = context.getState(getEnergy=True, groups={self.getForceGroup()})
         return state.getPotentialEnergy()
 
-    def getBias(self, logP, logZ):
-        """
-        Get the bias potential.
-
-        Parameters
-        ----------
-        logP
-            The values of the bias potential.
-        logZ
-            The logarithm of the partition function.
-        """
-        return self._prefactor * np.logaddexp(logP - logZ, self._logEpsilon)
-
-    def update(self, logP, logZ, context):
+    def update(self, kde, context):
         """
         Update the tabulated function with new values of the bias potential.
 
@@ -345,9 +332,68 @@ class OPESForce(mm.CustomCVForce):
             The Context in which to apply the bias.
         """
         self._table.setFunctionParameters(
-            *self._widths, self.getBias(logP, logZ).flatten(), *self._limits
+            *self._widths,
+            kde.getBias(self._prefactor, self._logEpsilon).flatten(),
+            *self._limits,
         )
         self.updateParametersInContext(context)
+
+
+class OnlineKDE:
+    def __init__(self, variables):
+        self.variables = variables
+        self.d = len(variables)
+        self._kernels = []
+        self._grid = [
+            np.linspace(cv.minValue, cv.maxValue, cv.gridWidth) for cv in variables
+        ]
+        self._logSumW = self._logSumWSq = -np.inf
+        self._logPK = np.empty(0)
+        self._logPG = np.full([cv.gridWidth for cv in reversed(variables)], -np.inf)
+
+    def update(self, log_weight, values, variance):
+        self._logSumW = np.logaddexp(self._logSumW, log_weight)
+        self._logSumWSq = np.logaddexp(self._logSumWSq, 2 * log_weight)
+        neff = np.exp(2 * self._logSumW - self._logSumWSq)
+        silverman = (neff * (self.d + 2) / 4) ** (-1 / (self.d + 4))
+        new_kernel = Kernel(self.variables, values, silverman * variance, log_weight)
+        if self._kernels:
+            points = np.stack([k.position for k in self._kernels])
+            index, min_sq_dist = new_kernel.findNearest(points)
+            to_remove = []
+            while min_sq_dist <= COMPRESSION_THRESHOLD**2:
+                to_remove.append(index)
+                new_kernel.merge(self._kernels[index])
+                index, min_sq_dist = new_kernel.findNearest(points, to_remove)
+            self._logPK = np.logaddexp(self._logPK, new_kernel.evaluate(points))
+            self._logPG = np.logaddexp(
+                self._logPG, new_kernel.evaluateOnGrid(self._grid)
+            )
+            if to_remove:
+                to_remove = sorted(to_remove, reverse=True)
+                for index in to_remove:
+                    k = self._kernels.pop(index)
+                    self._logPK = logsubexp(self._logPK, k.evaluate(points))
+                    self._logPG = logsubexp(self._logPG, k.evaluateOnGrid(self._grid))
+                self._logPK = np.delete(self._logPK, to_remove)
+            self._kernels.append(new_kernel)
+            log_p_new = [k.evaluate(new_kernel.position) for k in self._kernels]
+            self._logPK = np.append(self._logPK, np.logaddexp.reduce(log_p_new))
+        else:
+            self._kernels = [new_kernel]
+            self._logPG = new_kernel.evaluateOnGrid(self._grid)
+            self._logPK = log_p_new = np.array([new_kernel.logHeight])
+
+    def getLogZ(self):
+        return (
+            np.logaddexp.reduce(self._logPK)
+            - np.log(len(self._kernels))
+            - self._logSumW
+        )
+
+    def getBias(self, prefactor, logEpsilon):
+        logZ = np.logaddexp.reduce(self._logPK) - np.log(len(self._kernels))
+        return prefactor * np.logaddexp(self._logPG - logZ, logEpsilon)
 
 
 class OPES:  # pylint: disable=too-many-instance-attributes
@@ -408,13 +454,7 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         if barrier <= kbt:
             raise ValueError(f"barrier must be greater than {kbt}")
         self._kbt = kbt.in_units_of(unit.kilojoules_per_mole)
-        self._kernels = []
-        self._grid = [
-            np.linspace(cv.minValue, cv.maxValue, cv.gridWidth) for cv in variables
-        ]
-        self._logSumWeights = self._logSumWeightsSq = -np.inf
-        self._logPKernels = np.empty(0)
-        self._logPGrid = np.full([cv.gridWidth for cv in reversed(variables)], -np.inf)
+        self._kde = OnlineKDE(variables)
 
         gamma = barrier / kbt
         prefactor = (gamma - 1) * kbt if exploreMode else (1 - 1 / gamma) * kbt
@@ -439,13 +479,12 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         of collective variables. The values are in kJ/mole. The i'th position along an
         axis corresponds to minValue + i*(maxValue-minValue)/gridWidth.
         """
-        free_energy = -self._kbt * (self._logPGrid - self._logSumWeights)
+        free_energy = -self._kbt * (self._kde._logPG - self._kde._logSumW)
         if self.exploreMode:
             if corrected:
-                log_pk, log_pg = self._logPKernels, self._logPGrid
-                log_z = np.logaddexp.reduce(log_pk) - np.log(len(self._kernels))
                 free_energy -= (
-                    self._force.getBias(log_pg, log_z) * unit.kilojoules_per_mole
+                    self._kde.getBias(self._force._prefactor, self._force._logEpsilon)
+                    * unit.kilojoules_per_mole
                 )
             else:
                 free_energy *= self._bias_factor
@@ -455,17 +494,7 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         """
         Get the average density of the system as a function of the collective variables.
         """
-        return np.exp(
-            np.logaddexp.reduce(self._logPKernels)
-            - np.log(len(self._kernels))
-            - self._logSumWeights
-        )
-
-    def getInvAverageInvDensity(self):
-        """
-        Get the average density of the system as a function of the collective variables.
-        """
-        return np.exp(self._logSumWeights - self._log_acc_inv_density)
+        return np.exp(self._kde.getLogZ())
 
     def getCollectiveVariables(self, simulation):
         """
@@ -549,53 +578,10 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         context
             The Context in which to apply the bias.
         """
-
         if self.exploreMode:
             log_weight = 0
         else:
             log_weight = self._force.getEnergy(context) / self._kbt
-
-        self._logSumWeights = np.logaddexp(self._logSumWeights, log_weight)
-        self._logSumWeightsSq = np.logaddexp(self._logSumWeightsSq, 2 * log_weight)
-        neff = np.exp(2 * self._logSumWeights - self._logSumWeightsSq)
-        d = len(self.variables)
-        silverman = (neff * (d + 2) / 4) ** (-1 / (d + 4))
-
-        bandwidth = silverman * self._bwFactor * self._movingKernel.bandwidth
-        new_kernel = Kernel(self.variables, values, bandwidth, log_weight)
-
-        log_pk, log_pg = self._logPKernels, self._logPGrid
-        if self._kernels:
-            points = np.stack([k.position for k in self._kernels])
-            index, min_sq_dist = new_kernel.findNearest(points)
-            to_remove = []
-            while min_sq_dist <= COMPRESSION_THRESHOLD**2:
-                to_remove.append(index)
-                new_kernel.merge(self._kernels[index])
-                index, min_sq_dist = new_kernel.findNearest(points, to_remove)
-            log_pk = np.logaddexp(log_pk, new_kernel.evaluate(points))
-            log_pg = np.logaddexp(log_pg, new_kernel.evaluateOnGrid(self._grid))
-            if to_remove:
-                to_remove = sorted(to_remove, reverse=True)
-                for index in to_remove:
-                    k = self._kernels.pop(index)
-                    log_pk = logsubexp(log_pk, k.evaluate(points))
-                    log_pg = logsubexp(log_pg, k.evaluateOnGrid(self._grid))
-                log_pk = np.delete(log_pk, to_remove)
-            self._kernels.append(new_kernel)
-            log_p_new = [k.evaluate(new_kernel.position) for k in self._kernels]
-            log_pk = np.append(log_pk, np.logaddexp.reduce(log_p_new))
-        else:
-            self._kernels = [new_kernel]
-            log_pg = new_kernel.evaluateOnGrid(self._grid)
-            log_pk = log_p_new = np.array([new_kernel.logHeight])
-
-        log_density = np.logaddexp.reduce(log_p_new) - self._logSumWeights
-        self._log_acc_inv_density = np.logaddexp(
-            self._log_acc_inv_density, log_weight - log_density
-        )
-
-        log_z = np.logaddexp.reduce(log_pk) - np.log(len(self._kernels))
-        # log_z = 2 * self._logSumWeights - self._log_acc_inv_density
-        self._force.update(log_pg, log_z, context)
-        self._logPKernels, self._logPGrid = log_pk, log_pg
+        variance = self._bwFactor * self._movingKernel.bandwidth
+        self._kde.update(log_weight, values, variance)
+        self._force.update(self._kde, context)
