@@ -2,14 +2,12 @@ import functools
 import os
 import pickle
 import re
-
 from collections import namedtuple
 
 import numpy as np
 import openmm as mm
 from openmm import unit
 from openmm.app.metadynamics import _LoadedBias
-
 
 COMPRESSION_THRESHOLD = 1.0
 STATS_WINDOW_SIZE = 10
@@ -59,10 +57,12 @@ class CVSpace:
 
     @property
     def gridShape(self):
+        """Return the shape of the CV space grid."""
         return tuple(cv.gridWidth for cv in reversed(self.variables))
 
     @property
     def numDimensions(self):
+        """Return the number of dimensions in the CV space."""
         return len(self.variables)
 
     def displacement(self, position, endpoint):
@@ -179,19 +179,49 @@ class OnlineKDE:
         self._d = len(cvSpace.gridShape)
 
     def __getstate__(self):
-        return {
-            "cvSpace": self._cvSpace,
-            "kernels": [
+        if self._kernels:
+            kernelData = [
                 np.stack([k.position for k in self._kernels]),
                 np.stack([k.bandwidth for k in self._kernels]),
                 np.array([k.logWeight for k in self._kernels]),
-            ],
+            ]
+        else:
+            kernelData = []
+        return {
+            "cvSpace": self._cvSpace,
+            "counter": self._counter,
+            "sumW": self._logSumW,
+            "sumWSq": self._logSumWSq,
+            "logPK": self._logPK,
+            "logPG": self._logPG,
+            "kernelData": kernelData,
         }
 
     def __setstate__(self, state):
         self.__init__(state["cvSpace"])
-        for kernel in zip(state["kernels"]):
-            self.update(*kernel, adjustBandwidth=False)
+        self._counter = state["counter"]
+        self._logSumW = state["sumW"]
+        self._logSumWSq = state["sumWSq"]
+        self._logPK = state["logPK"]
+        self._logPG = state["logPG"]
+        self._kernels = [
+            Kernel(self._cvSpace, *data) for data in zip(*state["kernelData"])
+        ]
+
+    def __iadd__(self, other):
+        for k in other._kernels:
+            self.update(k.position, k.bandwidth, k.logWeight, adjustBandwidth=False)
+        return self
+
+    def copy(self):
+        new = OnlineKDE(self._cvSpace)
+        new._kernels = self._kernels.copy()
+        new._logSumW = self._logSumW
+        new._logSumWSq = self._logSumWSq
+        new._counter = self._counter
+        new._logPK = self._logPK.copy()
+        new._logPG = self._logPG.copy()
+        return new
 
     def update(self, position, bandwidth, logWeight, adjustBandwidth=True):
         """Update the KDE by depositing a new kernel."""
@@ -205,21 +235,21 @@ class OnlineKDE:
         newKernel = Kernel(self._cvSpace, position, bandwidth, logWeight)
         if self._kernels:
             points = np.stack([k.position for k in self._kernels])
-            index, min_sq_dist = newKernel.findNearest(points)
-            to_remove = []
-            while min_sq_dist <= COMPRESSION_THRESHOLD**2:
-                to_remove.append(index)
+            index, minSqDist = newKernel.findNearest(points)
+            toRemove = []
+            while minSqDist <= COMPRESSION_THRESHOLD**2:
+                toRemove.append(index)
                 newKernel.merge(self._kernels[index])
-                index, min_sq_dist = newKernel.findNearest(points, to_remove)
+                index, minSqDist = newKernel.findNearest(points, toRemove)
             self._logPK = np.logaddexp(self._logPK, newKernel.evaluate(points))
             self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
-            if to_remove:
-                to_remove = sorted(to_remove, reverse=True)
-                for index in to_remove:
+            if toRemove:
+                toRemove = sorted(toRemove, reverse=True)
+                for index in toRemove:
                     k = self._kernels.pop(index)
                     self._logPK = logsubexp(self._logPK, k.evaluate(points))
                     self._logPG = logsubexp(self._logPG, k.evaluateOnGrid())
-                self._logPK = np.delete(self._logPK, to_remove)
+                self._logPK = np.delete(self._logPK, toRemove)
             self._kernels.append(newKernel)
             logNewP = [k.evaluate(newKernel.position) for k in self._kernels]
             self._logPK = np.append(self._logPK, np.logaddexp.reduce(logNewP))
