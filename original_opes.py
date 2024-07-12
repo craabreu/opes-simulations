@@ -7,7 +7,9 @@ from openmm import unit
 
 
 COMPRESSION_THRESHOLD = 1.0
+STATS_WINDOW_SIZE = 10
 LIMITED_SUPPORT = False
+GLOBAL_VARIANCE = True
 
 
 def logsubexp(x, y):
@@ -183,15 +185,15 @@ class OnlineKDE:
         for kernel in zip(state["kernels"]):
             self.update(*kernel, adjustBandwidth=False)
 
-    def update(self, position, variance, logWeight, adjustBandwidth=True):
+    def update(self, position, bandwidth, logWeight, adjustBandwidth=True):
         """Update the KDE by depositing a new kernel."""
         self._logSumW = np.logaddexp(self._logSumW, logWeight)
         self._logSumWSq = np.logaddexp(self._logSumWSq, 2 * logWeight)
         if adjustBandwidth:
             neff = np.exp(2 * self._logSumW - self._logSumWSq)
             silverman = (neff * (self._d + 2) / 4) ** (-1 / (self._d + 4))
-            variance = variance * silverman
-        newKernel = Kernel(self._cvSpace, position, variance, logWeight)
+            bandwidth = bandwidth * silverman
+        newKernel = Kernel(self._cvSpace, position, bandwidth, logWeight)
         if self._kernels:
             points = np.stack([k.position for k in self._kernels])
             index, min_sq_dist = newKernel.findNearest(points)
@@ -227,7 +229,7 @@ class OnlineKDE:
         return np.logaddexp.reduce(self._logPK) - np.log(n) - self._logSumW
 
 
-class OPES:  # pylint: disable=too-many-instance-attributes
+class OPES:
     """Performs On-the-fly Probability Enhanced Sampling (OPES).
 
     This class implements the On-the-fly Probability Enhanced Sampling (OPES) method,
@@ -297,14 +299,16 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         self._kbt = kbt.in_units_of(unit.kilojoules_per_mole)
         self._cvSpace = CVSpace(variables)
         self._kde = OnlineKDE(self._cvSpace)
-        self._bias_factor = biasFactor
+        self._biasFactor = biasFactor
         self._prefactor = prefactor / unit.kilojoules_per_mole
         self._logEpsilon = -barrier / prefactor
 
-        self._tau = 10 * frequency
-        self._movingKernel = Kernel(self._cvSpace, *[np.zeros(d)] * 2, 0.0)
+        self._adaptiveVariance = varianceFrequency is not None
+        self._interval = varianceFrequency or frequency
+        self._tau = STATS_WINDOW_SIZE * frequency // varianceFrequency
         self._counter = 0
-        self._bwFactor = 1.0 if exploreMode else 1.0 / np.sqrt(biasFactor)
+        self._sampleMean = np.zeros(d)
+        self._sampleVariance = np.zeros(d)
 
         gridWidths = [cv.gridWidth for cv in variables]
         self._widths = [] if d == 1 else gridWidths
@@ -339,6 +343,35 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         if not freeGroups:
             raise RuntimeError("OPES requires a free force group, but all are in use.")
 
+    def _getBias(self):
+        return self._prefactor * np.logaddexp(
+            self._kde.getLogPDF() - self._kde.getLogMeanDensity(), self._logEpsilon
+        )
+
+    def _updateSampleStats(self, values):
+        """Update the sample mean and variance of the collective variables."""
+        self._counter += 1
+        delta = self._cvSpace.displacement(self._sampleMean, values)
+        x = 1 / min(self._tau, self._counter)
+        self._sampleMean = self._cvSpace.endpoint(self._sampleMean, x * delta)
+        delta *= self._cvSpace.displacement(self._sampleMean, values)
+        if GLOBAL_VARIANCE:
+            x = 1 / (self._tau + self._counter)
+        self._sampleVariance += x * (delta - self._sampleVariance)
+
+    def _addKernel(self, values, energy, context):
+        """Add a kernel to the PDF estimate and update the bias potential."""
+        if self.exploreMode:
+            logWeight = 0
+        else:
+            logWeight = energy / self._kbt
+        variance = self._sampleVariance / (1 if self.exploreMode else self._biasFactor)
+        self._kde.update(values, np.sqrt(variance), logWeight)
+        self._force.getTabulatedFunction(0).setFunctionParameters(
+            *self._widths, self._getBias().ravel(), *self._limits
+        )
+        self._force.updateParametersInContext(context)
+
     def getFreeEnergy(self, corrected=True):
         """
         Get the free energy of the system as a function of the collective variables.
@@ -352,7 +385,7 @@ class OPES:  # pylint: disable=too-many-instance-attributes
             if corrected:
                 free_energy -= self._force.getBias(self._kde) * unit.kilojoules_per_mole
             else:
-                free_energy *= self._bias_factor
+                free_energy *= self._biasFactor
         return free_energy
 
     def getAverageDensity(self):
@@ -383,17 +416,28 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         steps
             The number of time steps to integrate.
         """
-        while steps:
-            next_steps = min(
-                steps, self.frequency - simulation.currentStep % self.frequency
+        stepsToGo = steps
+        groups = {self._force.getForceGroup()}
+        while stepsToGo > 0:
+            nextSteps = stepsToGo
+            nextSteps = min(
+                nextSteps, self._interval - simulation.currentStep % self._interval
             )
-            for _ in range(next_steps):
-                simulation.step(1)
-                values = self._force.getCollectiveVariableValues(simulation.context)
-                self._updateMovingKernel(values)
-            if simulation.currentStep % self.frequency == 0:
-                self._addKernel(values, simulation.context)
-            steps -= next_steps
+            simulation.step(nextSteps)
+            if simulation.currentStep % self._interval == 0:
+                position = self.getCollectiveVariables(simulation)
+                if self._adaptiveVariance:
+                    self._updateSampleStats(position)
+                if simulation.currentStep % self.frequency == 0:
+                    state = simulation.context.getState(getEnergy=True, groups=groups)
+                    energy = state.getPotentialEnergy()
+                    self._addKernel(position, energy, simulation.context)
+                    if (
+                        self.saveFrequency is not None
+                        and simulation.currentStep % self.saveFrequency == 0
+                    ):
+                        self._syncWithDisk()
+            stepsToGo -= nextSteps
 
     def setVariance(self, variance):
         """
@@ -404,60 +448,8 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         variance
             The variance of the probability distribution estimate.
         """
-        self._movingKernel.bandwidth = np.sqrt(variance)
+        self._sampleVariance = variance
 
     def getVariance(self):
-        """
-        Get the variance of the probability distribution estimate.
-        """
-        return self._movingKernel.bandwidth**2
-
-    def _getBias(self):
-        return self._prefactor * np.logaddexp(
-            self._kde.getLogPDF() - self._kde.getLogMeanDensity(), self._logEpsilon
-        )
-
-    def _updateMovingKernel(self, values):
-        """
-        Update the moving kernel used to estimate the bandwidth of the
-
-        Parameters
-        ----------
-        values
-            The current values of the collective variables.
-        """
-        self._counter += 1
-        kernel = self._movingKernel
-        delta = kernel.cvSpace.displacement(kernel.position, values)
-        x = 1 / min(self._tau, self._counter)
-        kernel.position = kernel.cvSpace.endpoint(kernel.position, x * delta)
-        delta *= kernel.cvSpace.displacement(kernel.position, values)
-        n = self._tau + self._counter
-        variance = (n - 1) * kernel.bandwidth**2 + delta
-        kernel.bandwidth = np.sqrt(variance / n)
-
-    def _addKernel(self, values, context):
-        """
-        Add a kernel to the probability distribution estimate and update the bias
-        potential.
-
-        Parameters
-        ----------
-        values
-            The current values of the collective variables
-        context
-            The Context in which to apply the bias.
-        """
-        if self.exploreMode:
-            logWeight = 0
-        else:
-            state = context.getState(
-                getEnergy=True, groups={self._force.getForceGroup()}
-            )
-            logWeight = state.getPotentialEnergy() / self._kbt
-        variance = self._bwFactor * self._movingKernel.bandwidth
-        self._kde.update(values, variance, logWeight)
-        self._force.getTabulatedFunction(0).setFunctionParameters(
-            *self._widths, self._getBias().ravel(), *self._limits
-        )
-        self._force.updateParametersInContext(context)
+        """Get the variance of the probability distribution estimate."""
+        return self._sampleVariance
