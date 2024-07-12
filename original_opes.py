@@ -1,9 +1,14 @@
-from functools import reduce
+import functools
+import os
+import pickle
+import re
+
 from collections import namedtuple
 
 import numpy as np
 import openmm as mm
 from openmm import unit
+from openmm.app.metadynamics import _LoadedBias
 
 
 COMPRESSION_THRESHOLD = 1.0
@@ -11,6 +16,10 @@ STATS_WINDOW_SIZE = 10
 LIMITED_SUPPORT = False
 GLOBAL_VARIANCE = True
 UNCORRECTED_EXPLORE = False
+REWEIGHTED_FES = True
+
+
+_CV = namedtuple("_Variable", ["minValue", "maxValue", "gridWidth", "periodic"])
 
 
 def logsubexp(x, y):
@@ -23,9 +32,6 @@ def logsubexp(x, y):
     array2[~mask2] = -np.inf
     array1[mask1] = array2 + x[mask1]
     return array1
-
-
-_CV = namedtuple("_Variable", ["minValue", "maxValue", "gridWidth", "periodic"])
 
 
 class CVSpace:
@@ -156,7 +162,7 @@ class Kernel:
             self._exponents(dist / sigma)
             for dist, sigma in zip(distances, self.bandwidth)
         ]
-        return self.logHeight + reduce(np.add.outer, reversed(exponents))
+        return self.logHeight + functools.reduce(np.add.outer, reversed(exponents))
 
 
 class OnlineKDE:
@@ -165,6 +171,7 @@ class OnlineKDE:
     def __init__(self, cvSpace):
         self._kernels = []
         self._cvSpace = cvSpace
+        self._counter = 0
         self._logSumW = -np.inf
         self._logSumWSq = -np.inf
         self._logPK = np.empty(0)
@@ -188,6 +195,7 @@ class OnlineKDE:
 
     def update(self, position, bandwidth, logWeight, adjustBandwidth=True):
         """Update the KDE by depositing a new kernel."""
+        self._counter += 1
         self._logSumW = np.logaddexp(self._logSumW, logWeight)
         self._logSumWSq = np.logaddexp(self._logSumWSq, 2 * logWeight)
         if adjustBandwidth:
@@ -228,6 +236,10 @@ class OnlineKDE:
         """Get the logarithm of the mean density."""
         n = len(self._kernels)
         return np.logaddexp.reduce(self._logPK) - np.log(n) - self._logSumW
+
+    def getLogNormalizingRatio(self):
+        """Get the logarithm of the ratio of the normalizing constants."""
+        return self._logSumW - np.log(self._counter)
 
 
 class OPES:
@@ -297,9 +309,19 @@ class OPES:
             prefactor *= biasFactor
         varNames = [f"cv{i}" for i in range(d)]
 
-        self._kbt = kbt.in_units_of(unit.kilojoules_per_mole)
         self._cvSpace = CVSpace(variables)
-        self._kde = OnlineKDE(self._cvSpace)
+        self._KDE = OnlineKDE(self._cvSpace)
+        self._rwKDE = OnlineKDE(self._cvSpace) if exploreMode else self._KDE
+
+        if saveFrequency:
+            self._selfKDE = OnlineKDE(self._cvSpace)
+            self._selfRwKDE = OnlineKDE(self._cvSpace) if exploreMode else self._selfKDE
+            self._id = np.random.randint(0x7FFFFFFF)
+            self._saveIndex = 0
+            self._loadedBiases = {}
+            self._syncWithDisk()
+
+        self._kbt = kbt.in_units_of(unit.kilojoules_per_mole)
         self._biasFactor = biasFactor
         self._prefactor = prefactor / unit.kilojoules_per_mole
         self._logEpsilon = -barrier / prefactor
@@ -346,7 +368,7 @@ class OPES:
 
     def _getBias(self):
         return self._prefactor * np.logaddexp(
-            self._kde.getLogPDF() - self._kde.getLogMeanDensity(), self._logEpsilon
+            self._KDE.getLogPDF() - self._KDE.getLogMeanDensity(), self._logEpsilon
         )
 
     def _updateSampleStats(self, values):
@@ -362,13 +384,69 @@ class OPES:
 
     def _addKernel(self, values, energy, context):
         """Add a kernel to the PDF estimate and update the bias potential."""
-        logWeight = 0 if self.exploreMode else energy / self._kbt
-        variance = self._sampleVariance / (1 if self.exploreMode else self._biasFactor)
-        self._kde.update(values, np.sqrt(variance), logWeight)
+        bandwidth = np.sqrt(self._sampleVariance)
+        if self.exploreMode:
+            self._KDE.update(values, bandwidth, 0)
+            if self.saveFrequency:
+                self._selfKDE.update(values, bandwidth, 0)
+
+        logWeight = energy / self._kbt
+        bandwidth /= np.sqrt(self._biasFactor)
+        self._rwKDE.update(values, bandwidth, logWeight)
+        if self.saveFrequency:
+            self._selfRwKDE.update(values, bandwidth, logWeight)
+
         self._force.getTabulatedFunction(0).setFunctionParameters(
             *self._widths, self._getBias().ravel(), *self._limits
         )
         self._force.updateParametersInContext(context)
+
+    def _syncWithDisk(self):
+        """
+        Save biases to disk, and check for updated files created by other processes.
+        """
+
+        oldName = os.path.join(self.biasDir, f"bias_{self._id}_{self._saveIndex}.pkl")
+        self._saveIndex += 1
+        tempName = os.path.join(self.biasDir, f"temp_{self._id}_{self._saveIndex}.pkl")
+        fileName = os.path.join(self.biasDir, f"bias_{self._id}_{self._saveIndex}.pkl")
+        data = [self._selfKDE]
+        if self.exploreMode:
+            data.append(self._selfRwKDE)
+        with open(tempName, "wb") as file:
+            pickle.dump(data, file)
+        os.rename(tempName, fileName)
+        if os.path.exists(oldName):
+            os.remove(oldName)
+
+        fileLoaded = False
+        pattern = re.compile(r"bias_(.*)_(.*)\.pkl")
+        for filename in os.listdir(self.biasDir):
+            match = pattern.match(filename)
+            if match is not None:
+                matchId = int(match.group(1))
+                matchIndex = int(match.group(2))
+                if matchId != self._id and (
+                    matchId not in self._loadedBiases
+                    or matchIndex > self._loadedBiases[matchId].index
+                ):
+                    try:
+                        with open(os.path.join(self.biasDir, filename), "rb") as file:
+                            data = pickle.load(file)
+                        self._loadedBiases[matchId] = _LoadedBias(
+                            matchId, matchIndex, data
+                        )
+                        fileLoaded = True
+                    except IOError:
+                        pass
+
+        if fileLoaded:
+            self._KDE = self._selfKDE.copy()
+            self._rwKDE = self._selfRwKDE.copy() if self.exploreMode else self._KDE
+            for bias in self._loadedBiases.values():
+                self._KDE += bias.bias[0]
+                if self.exploreMode:
+                    self._rwKDE += bias.bias[1]
 
     def getFreeEnergy(self):
         """
@@ -378,18 +456,19 @@ class OPES:
         of collective variables. The values are in kJ/mole. The i'th position along an
         axis corresponds to minValue + i*(maxValue-minValue)/gridWidth.
         """
-        free_energy = -self._kbt * self._kde.getLogPDF()
-        if self.exploreMode:
-            if UNCORRECTED_EXPLORE:
-                return free_energy * self._biasFactor
-            return free_energy - self._getBias() * unit.kilojoules_per_mole
-        return free_energy
+        if not self.exploreMode or REWEIGHTED_FES:
+            return -self._kbt * self._rwKDE.getLogPDF()
+        biasedFreeEnergy = -self._kbt * self._KDE.getLogPDF()
+        if UNCORRECTED_EXPLORE:
+            return biasedFreeEnergy * self._biasFactor
+        variation = self._kbt * self._rwKDE.getLogNormalizingRatio()
+        return biasedFreeEnergy - self._getBias() * unit.kilojoules_per_mole + variation
 
     def getAverageDensity(self):
         """
         Get the average density of the system as a function of the collective variables.
         """
-        return np.exp(self._kde.getLogMeanDensity())
+        return np.exp(self._KDE.getLogMeanDensity())
 
     def getCollectiveVariables(self, simulation):
         """
