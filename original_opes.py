@@ -22,15 +22,16 @@ def logsubexp(x, y):
     return array1
 
 
+_CV = namedtuple("_Variable", ["minValue", "maxValue", "gridWidth", "periodic"])
+
+
 class CVSpace:
-    """
-    A class to represent the space of collective variables defined by a list of
-    openmm.app.BiasVariable objects.
-    """
+    """A class to represent the space of collective variables."""
 
     def __init__(self, variables):
-        self.d = len(variables)
-        self.gridShape = tuple(cv.gridWidth for cv in reversed(variables))
+        self.variables = [
+            _CV(cv.minValue, cv.maxValue, cv.gridWidth, cv.periodic) for cv in variables
+        ]
         self._periodic = any(cv.periodic for cv in variables)
         self._grid = [
             np.linspace(cv.minValue, cv.maxValue, cv.gridWidth) for cv in variables
@@ -40,6 +41,20 @@ class CVSpace:
             self._lbounds = np.array([variables[i].minValue for i in self._pdims])
             ubounds = np.array([variables[i].maxValue for i in self._pdims])
             self._lengths = ubounds - self._lbounds
+
+    def __getstate__(self):
+        return {"variables": [cv._asdict() for cv in self.variables]}
+
+    def __setstate__(self, state):
+        self.__init__([_CV(**kwargs) for kwargs in state["variables"]])
+
+    @property
+    def gridShape(self):
+        return tuple(cv.gridWidth for cv in reversed(self.variables))
+
+    @property
+    def numDimensions(self):
+        return len(self.variables)
 
     def displacement(self, position, endpoint):
         """Compute the displacement between two points in the CV space."""
@@ -74,7 +89,8 @@ class Kernel:
 
     def __init__(self, cvSpace, position, bandwidth, logWeight):
         self.cvSpace = cvSpace
-        self.d = cvSpace.d
+        self.d = cvSpace.numDimensions
+        assert len(position) == len(bandwidth) == self.d
         self.position = np.array(position)
         self.bandwidth = np.array(bandwidth)
         self.logWeight = logWeight
@@ -106,23 +122,23 @@ class Kernel:
         """
         if points.size == 0:
             return -1, np.inf
-        sq_mahalanobis_distances = np.sum(self._scaledDistances(points) ** 2, axis=-1)
+        sqMahalanobisDistances = np.sum(self._scaledDistances(points) ** 2, axis=-1)
         if ignore:
-            sq_mahalanobis_distances[ignore] = np.inf
-        index = np.argmin(sq_mahalanobis_distances)
-        return index, sq_mahalanobis_distances[index]
+            sqMahalanobisDistances[ignore] = np.inf
+        index = np.argmin(sqMahalanobisDistances)
+        return index, sqMahalanobisDistances[index]
 
     def merge(self, other):
         """Change this kernel by merging it with another one."""
-        log_sum_weights = np.logaddexp(self.logWeight, other.logWeight)
-        w1 = np.exp(self.logWeight - log_sum_weights)
-        w2 = np.exp(other.logWeight - log_sum_weights)
+        logSumWeights = np.logaddexp(self.logWeight, other.logWeight)
+        w1 = np.exp(self.logWeight - logSumWeights)
+        w2 = np.exp(other.logWeight - logSumWeights)
         disp = self.cvSpace.displacement(self.position, other.position)
         self.position = self.cvSpace.endpoint(self.position, w2 * disp)
         self.bandwidth = np.sqrt(
             w1 * self.bandwidth**2 + w2 * other.bandwidth**2 + w1 * w2 * disp**2
         )
-        self.logWeight = log_sum_weights
+        self.logWeight = logSumWeights
         self.logHeight = self._computeLogHeight()
 
     def evaluate(self, points):
@@ -151,25 +167,42 @@ class OnlineKDE:
         self._logSumWSq = -np.inf
         self._logPK = np.empty(0)
         self._logPG = np.full(cvSpace.gridShape, -np.inf)
+        self._d = len(cvSpace.gridShape)
 
-    def update(self, log_weight, position, variance):
+    def __getstate__(self):
+        return {
+            "cvSpace": self._cvSpace,
+            "kernels": [
+                np.stack([k.position for k in self._kernels]),
+                np.stack([k.bandwidth for k in self._kernels]),
+                np.array([k.logWeight for k in self._kernels]),
+            ],
+        }
+
+    def __setstate__(self, state):
+        self.__init__(state["cvSpace"])
+        for kernel in zip(state["kernels"]):
+            self.update(*kernel, adjustBandwidth=False)
+
+    def update(self, position, variance, logWeight, adjustBandwidth=True):
         """Update the KDE by depositing a new kernel."""
-        self._logSumW = np.logaddexp(self._logSumW, log_weight)
-        self._logSumWSq = np.logaddexp(self._logSumWSq, 2 * log_weight)
-        neff = np.exp(2 * self._logSumW - self._logSumWSq)
-        d = self._cvSpace.d
-        silverman = (neff * (d + 2) / 4) ** (-1 / (d + 4))
-        new_kernel = Kernel(self._cvSpace, position, silverman * variance, log_weight)
+        self._logSumW = np.logaddexp(self._logSumW, logWeight)
+        self._logSumWSq = np.logaddexp(self._logSumWSq, 2 * logWeight)
+        if adjustBandwidth:
+            neff = np.exp(2 * self._logSumW - self._logSumWSq)
+            silverman = (neff * (self._d + 2) / 4) ** (-1 / (self._d + 4))
+            variance = variance * silverman
+        newKernel = Kernel(self._cvSpace, position, variance, logWeight)
         if self._kernels:
             points = np.stack([k.position for k in self._kernels])
-            index, min_sq_dist = new_kernel.findNearest(points)
+            index, min_sq_dist = newKernel.findNearest(points)
             to_remove = []
             while min_sq_dist <= COMPRESSION_THRESHOLD**2:
                 to_remove.append(index)
-                new_kernel.merge(self._kernels[index])
-                index, min_sq_dist = new_kernel.findNearest(points, to_remove)
-            self._logPK = np.logaddexp(self._logPK, new_kernel.evaluate(points))
-            self._logPG = np.logaddexp(self._logPG, new_kernel.evaluateOnGrid())
+                newKernel.merge(self._kernels[index])
+                index, min_sq_dist = newKernel.findNearest(points, to_remove)
+            self._logPK = np.logaddexp(self._logPK, newKernel.evaluate(points))
+            self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
             if to_remove:
                 to_remove = sorted(to_remove, reverse=True)
                 for index in to_remove:
@@ -177,13 +210,13 @@ class OnlineKDE:
                     self._logPK = logsubexp(self._logPK, k.evaluate(points))
                     self._logPG = logsubexp(self._logPG, k.evaluateOnGrid())
                 self._logPK = np.delete(self._logPK, to_remove)
-            self._kernels.append(new_kernel)
-            log_p_new = [k.evaluate(new_kernel.position) for k in self._kernels]
-            self._logPK = np.append(self._logPK, np.logaddexp.reduce(log_p_new))
+            self._kernels.append(newKernel)
+            logNewP = [k.evaluate(newKernel.position) for k in self._kernels]
+            self._logPK = np.append(self._logPK, np.logaddexp.reduce(logNewP))
         else:
-            self._kernels = [new_kernel]
-            self._logPG = new_kernel.evaluateOnGrid()
-            self._logPK = np.array([new_kernel.logHeight])
+            self._kernels = [newKernel]
+            self._logPG = newKernel.evaluateOnGrid()
+            self._logPK = np.array([newKernel.logHeight])
 
     def getLogPDF(self):
         """Get the logarithm of the probability density function (PDF) on the grid."""
@@ -484,9 +517,9 @@ class OPES:  # pylint: disable=too-many-instance-attributes
             The Context in which to apply the bias.
         """
         if self.exploreMode:
-            log_weight = 0
+            logWeight = 0
         else:
-            log_weight = self._force.getEnergy(context) / self._kbt
+            logWeight = self._force.getEnergy(context) / self._kbt
         variance = self._bwFactor * self._movingKernel.bandwidth
-        self._kde.update(log_weight, values, variance)
+        self._kde.update(values, variance, logWeight)
         self._force.update(self._kde, context)
