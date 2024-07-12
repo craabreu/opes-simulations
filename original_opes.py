@@ -10,6 +10,7 @@ COMPRESSION_THRESHOLD = 1.0
 STATS_WINDOW_SIZE = 10
 LIMITED_SUPPORT = False
 GLOBAL_VARIANCE = True
+UNCORRECTED_EXPLORE = False
 
 
 def logsubexp(x, y):
@@ -361,10 +362,7 @@ class OPES:
 
     def _addKernel(self, values, energy, context):
         """Add a kernel to the PDF estimate and update the bias potential."""
-        if self.exploreMode:
-            logWeight = 0
-        else:
-            logWeight = energy / self._kbt
+        logWeight = 0 if self.exploreMode else energy / self._kbt
         variance = self._sampleVariance / (1 if self.exploreMode else self._biasFactor)
         self._kde.update(values, np.sqrt(variance), logWeight)
         self._force.getTabulatedFunction(0).setFunctionParameters(
@@ -372,7 +370,7 @@ class OPES:
         )
         self._force.updateParametersInContext(context)
 
-    def getFreeEnergy(self, corrected=True):
+    def getFreeEnergy(self):
         """
         Get the free energy of the system as a function of the collective variables.
 
@@ -382,10 +380,9 @@ class OPES:
         """
         free_energy = -self._kbt * self._kde.getLogPDF()
         if self.exploreMode:
-            if corrected:
-                free_energy -= self._force.getBias(self._kde) * unit.kilojoules_per_mole
-            else:
-                free_energy *= self._biasFactor
+            if UNCORRECTED_EXPLORE:
+                return free_energy * self._biasFactor
+            return free_energy - self._getBias() * unit.kilojoules_per_mole
         return free_energy
 
     def getAverageDensity(self):
