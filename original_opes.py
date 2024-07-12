@@ -1,4 +1,5 @@
 from functools import reduce
+from collections import namedtuple
 
 import numpy as np
 import openmm as mm
@@ -22,10 +23,14 @@ def logsubexp(x, y):
 
 
 class CVSpace:
-    """A class to represent the space of collective variables."""
+    """
+    A class to represent the space of collective variables defined by a list of
+    openmm.app.BiasVariable objects.
+    """
 
     def __init__(self, variables):
         self.d = len(variables)
+        self.gridShape = tuple(cv.gridWidth for cv in reversed(variables))
         self._periodic = any(cv.periodic for cv in variables)
         self._grid = [
             np.linspace(cv.minValue, cv.maxValue, cv.gridWidth) for cv in variables
@@ -65,12 +70,13 @@ class CVSpace:
 
 
 class Kernel:
-    """A multivariate kernel with diagonal bandwidth matrix."""
+    """A multivariate kernel function with diagonal bandwidth matrix."""
 
     def __init__(self, cvSpace, position, bandwidth, logWeight):
         self.cvSpace = cvSpace
-        self.position = np.asarray(position)
-        self.bandwidth = np.asarray(bandwidth)
+        self.d = cvSpace.d
+        self.position = np.array(position)
+        self.bandwidth = np.array(bandwidth)
         self.logWeight = logWeight
         self.logHeight = self._computeLogHeight()
 
@@ -78,20 +84,20 @@ class Kernel:
         if np.any(self.bandwidth == 0):
             return -np.inf
         const = np.log(559872 / 35) if LIMITED_SUPPORT else np.log(2 * np.pi) / 2
-        return self.logWeight - self.cvSpace.d * const - np.log(self.bandwidth).sum()
+        return self.logWeight - self.d * const - np.sum(np.log(self.bandwidth))
 
     def _scaledDistances(self, points):
         return self.cvSpace.displacement(self.position, points) / self.bandwidth
 
     @staticmethod
-    def _logs(x):
+    def _exponents(x):
         if LIMITED_SUPPORT:
             values = 9 - x**2
             mask = values > 0
             values[mask] = 4 * np.log(values[mask])
             values[~mask] = -np.inf
             return values
-        return -0.5 * x ** 2
+        return -0.5 * x**2
 
     def findNearest(self, points, ignore=()):
         """
@@ -100,7 +106,7 @@ class Kernel:
         """
         if points.size == 0:
             return -1, np.inf
-        sq_mahalanobis_distances = np.square(self._scaledDistances(points)).sum(axis=-1)
+        sq_mahalanobis_distances = np.sum(self._scaledDistances(points) ** 2, axis=-1)
         if ignore:
             sq_mahalanobis_distances[ignore] = np.inf
         index = np.argmin(sq_mahalanobis_distances)
@@ -121,13 +127,16 @@ class Kernel:
 
     def evaluate(self, points):
         """Evaluate the logarithm of the kernel at the given point or points."""
-        return self.logHeight + self._logs(self._scaledDistances(points)).sum(axis=-1)
+        return self.logHeight + np.sum(
+            self._exponents(self._scaledDistances(points)), axis=-1
+        )
 
     def evaluateOnGrid(self):
         """Evaluate the logarithms of the kernel on a regular grid."""
         distances = self.cvSpace.gridDistances(self.position)
         exponents = [
-            self._logs(dist / sigma) for dist, sigma in zip(distances, self.bandwidth)
+            self._exponents(dist / sigma)
+            for dist, sigma in zip(distances, self.bandwidth)
         ]
         return self.logHeight + reduce(np.add.outer, reversed(exponents))
 
@@ -135,23 +144,22 @@ class Kernel:
 class OnlineKDE:
     """Online Kernel Density Estimation (KDE) for collective variables."""
 
-    def __init__(self, variables):
-        self.variables = variables
+    def __init__(self, cvSpace):
         self._kernels = []
-        self._cvSpace = CVSpace(variables)
+        self._cvSpace = cvSpace
         self._logSumW = -np.inf
         self._logSumWSq = -np.inf
         self._logPK = np.empty(0)
-        self._logPG = np.full([cv.gridWidth for cv in reversed(variables)], -np.inf)
+        self._logPG = np.full(cvSpace.gridShape, -np.inf)
 
-    def update(self, log_weight, values, variance):
-        """Update the KDE with a new kernel."""
+    def update(self, log_weight, position, variance):
+        """Update the KDE by depositing a new kernel."""
         self._logSumW = np.logaddexp(self._logSumW, log_weight)
         self._logSumWSq = np.logaddexp(self._logSumWSq, 2 * log_weight)
         neff = np.exp(2 * self._logSumW - self._logSumWSq)
-        d = len(self.variables)
+        d = self._cvSpace.d
         silverman = (neff * (d + 2) / 4) ** (-1 / (d + 4))
-        new_kernel = Kernel(self._cvSpace, values, silverman * variance, log_weight)
+        new_kernel = Kernel(self._cvSpace, position, silverman * variance, log_weight)
         if self._kernels:
             points = np.stack([k.position for k in self._kernels])
             index, min_sq_dist = new_kernel.findNearest(points)
@@ -178,7 +186,7 @@ class OnlineKDE:
             self._logPK = np.array([new_kernel.logHeight])
 
     def getLogPDF(self):
-        """Get the logarithm of the probability density function (PDF)."""
+        """Get the logarithm of the probability density function (PDF) on the grid."""
         return self._logPG - self._logSumW
 
     def getLogMeanDensity(self):
@@ -355,7 +363,8 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         if barrier <= kbt:
             raise ValueError(f"barrier must be greater than {kbt}")
         self._kbt = kbt.in_units_of(unit.kilojoules_per_mole)
-        self._kde = OnlineKDE(variables)
+        self._cvSpace = CVSpace(variables)
+        self._kde = OnlineKDE(self._cvSpace)
 
         gamma = barrier / kbt
         prefactor = (gamma - 1) * kbt if exploreMode else (1 - 1 / gamma) * kbt
@@ -366,7 +375,7 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         system.addForce(self._force)
 
         self._tau = 10 * frequency
-        self._movingKernel = Kernel(CVSpace(variables), *[np.zeros(num_vars)] * 2, 0.0)
+        self._movingKernel = Kernel(self._cvSpace, *[np.zeros(num_vars)] * 2, 0.0)
         self._counter = 0
         self._bwFactor = 1.0 if exploreMode else 1.0 / np.sqrt(gamma)
 
