@@ -124,7 +124,7 @@ def run_opes(index: int, method: str, nstep: int, original: bool):
     fes -= fes.min()
     with open(filename, "w", encoding="utf-8") as file:
         file.write("x,fes\n")
-        for x, f in zip(sampler._grid[0], fes):
+        for x, f in zip(np.linspace(grid_min, grid_max, grid_bin), fes):
             write(file, x, f)
 
 
