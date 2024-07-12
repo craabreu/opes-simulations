@@ -85,12 +85,10 @@ class CVSpace:
 
 
 class Kernel:
-    """A multivariate kernel function with diagonal bandwidth matrix."""
+    """A multivariate kernel function with zero covariance."""
 
     def __init__(self, cvSpace, position, bandwidth, logWeight):
         self.cvSpace = cvSpace
-        self.d = cvSpace.numDimensions
-        assert len(position) == len(bandwidth) == self.d
         self.position = np.array(position)
         self.bandwidth = np.array(bandwidth)
         self.logWeight = logWeight
@@ -100,7 +98,8 @@ class Kernel:
         if np.any(self.bandwidth == 0):
             return -np.inf
         const = np.log(559872 / 35) if LIMITED_SUPPORT else np.log(2 * np.pi) / 2
-        return self.logWeight - self.d * const - np.sum(np.log(self.bandwidth))
+        d = self.cvSpace.numDimensions
+        return self.logWeight - d * const - np.sum(np.log(self.bandwidth))
 
     def _scaledDistances(self, points):
         return self.cvSpace.displacement(self.position, points) / self.bandwidth
@@ -228,116 +227,6 @@ class OnlineKDE:
         return np.logaddexp.reduce(self._logPK) - np.log(n) - self._logSumW
 
 
-class OPESForce(mm.CustomCVForce):
-    """
-    A custom force implementation for the On-The-Fly Probability Enhanced Sampling
-    (OPES) method.
-
-    Parameters
-    ----------
-    variables
-        The collective variables to sample.
-    barrier
-        The energy barrier to overcome.
-    prefactor
-        The prefactor of the bias potential.
-
-    Raises
-    ------
-    ValueError
-        If the number of periodic variables is not 0 or equal to the total number of
-        variables.
-    RuntimeError
-        If all 32 force groups in the system are already in use.
-    """
-
-    def __init__(self, variables, barrier, prefactor):
-        barrier = barrier.value_in_unit(unit.kilojoules_per_mole)
-        prefactor = prefactor.value_in_unit(unit.kilojoules_per_mole)
-        num_vars = len(variables)
-        num_periodics = sum(cv.periodic for cv in variables)
-        if num_periodics not in [0, num_vars]:
-            raise ValueError("OPES cannot handle mixed periodic/non-periodic variables")
-        self._prefactor = prefactor
-        self._logEpsilon = -barrier / prefactor
-        grid_widths = [cv.gridWidth for cv in variables]
-        self._widths = [] if num_vars == 1 else grid_widths
-        self._limits = sum(([cv.minValue, cv.maxValue] for cv in variables), [])
-        self._table = getattr(mm, f"Continuous{num_vars}DFunction")(
-            *self._widths,
-            np.full(np.prod(grid_widths), -barrier),
-            *self._limits,
-            num_periodics == num_vars,
-        )
-        var_names = [f"cv{i}" for i in range(len(variables))]
-        super().__init__(f"table({', '.join(var_names)})")
-        for name, var in zip(var_names, variables):
-            self.addCollectiveVariable(name, var.force)
-        self.addTabulatedFunction("table", self._table)
-
-    def setUniqueForceGroup(self, system):
-        """
-        Set the force group to the unused group with the highest index in the system.
-
-        Parameters
-        ----------
-        system
-            The System to which the force will be added.
-
-        Raises
-        ------
-        RuntimeError
-            If all 32 force groups in the system are already in use.
-        """
-        free_groups = set(range(32)) - {f.getForceGroup() for f in system.getForces()}
-        if not free_groups:
-            raise RuntimeError("All 32 force groups are already in use.")
-        self.setForceGroup(max(free_groups))
-
-    def getEnergy(self, context):
-        """
-        Get the energy of the bias potential.
-
-        Parameters
-        ----------
-        context
-            The Context in which to evaluate the energy.
-        """
-        state = context.getState(getEnergy=True, groups={self.getForceGroup()})
-        return state.getPotentialEnergy()
-
-    def getBias(self, kde):
-        """
-        Get the values of the bias potential.
-
-        Returns
-        -------
-        np.ndarray
-            The values of the bias potential.
-        """
-        return self._prefactor * np.logaddexp(
-            kde.getLogPDF() - kde.getLogMeanDensity(), self._logEpsilon
-        )
-
-    def update(self, kde, context):
-        """
-        Update the tabulated function with new values of the bias potential.
-
-        Parameters
-        ----------
-        logP
-            The new values of the bias potential.
-        logZ
-            The logarithm of the partition function.
-        context
-            The Context in which to apply the bias.
-        """
-        self._table.setFunctionParameters(
-            *self._widths, self.getBias(kde).ravel(), *self._limits
-        )
-        self.updateParametersInContext(context)
-
-
 class OPES:  # pylint: disable=too-many-instance-attributes
     """Performs On-the-fly Probability Enhanced Sampling (OPES).
 
@@ -375,42 +264,80 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         temperature,
         barrier,
         frequency,
-        exploreMode,
-        varianceFrequency,
+        exploreMode=False,
+        varianceFrequency=None,
+        saveFrequency=None,
+        biasDir=None,
     ):
         if not unit.is_quantity(temperature):
-            temperature *= unit.kelvin
+            temperature = temperature * unit.kelvin
         if not unit.is_quantity(barrier):
-            barrier *= unit.kilojoules_per_mole
+            barrier = barrier * unit.kilojoules_per_mole
         self.variables = variables
         self.temperature = temperature
-        self.frequency = frequency
         self.barrier = barrier
+        self.frequency = frequency
         self.exploreMode = exploreMode
+        self.varianceFrequency = varianceFrequency
+        self.saveFrequency = saveFrequency
+        self.biasDir = biasDir
 
-        num_vars = len(variables)
-        if not 1 <= num_vars <= 3:
-            raise ValueError("OPES requires 1, 2, or 3 collective variables")
-
+        d = len(variables)
         kbt = unit.MOLAR_GAS_CONSTANT_R * temperature
-        if barrier <= kbt:
-            raise ValueError(f"barrier must be greater than {kbt}")
+        biasFactor = barrier / kbt
+        numPeriodics = sum(v.periodic for v in variables)
+        freeGroups = set(range(32)) - set(f.getForceGroup() for f in system.getForces())
+        self._validate(d, biasFactor, numPeriodics, freeGroups)
+
+        prefactor = (1 - 1 / biasFactor) * kbt
+        if exploreMode:
+            prefactor *= biasFactor
+        varNames = [f"cv{i}" for i in range(d)]
+
         self._kbt = kbt.in_units_of(unit.kilojoules_per_mole)
         self._cvSpace = CVSpace(variables)
         self._kde = OnlineKDE(self._cvSpace)
-
-        gamma = barrier / kbt
-        prefactor = (gamma - 1) * kbt if exploreMode else (1 - 1 / gamma) * kbt
-        self._force = OPESForce(variables, barrier, prefactor)
-        self._bias_factor = gamma
-        if not exploreMode:
-            self._force.setUniqueForceGroup(system)
-        system.addForce(self._force)
+        self._bias_factor = biasFactor
+        self._prefactor = prefactor / unit.kilojoules_per_mole
+        self._logEpsilon = -barrier / prefactor
 
         self._tau = 10 * frequency
-        self._movingKernel = Kernel(self._cvSpace, *[np.zeros(num_vars)] * 2, 0.0)
+        self._movingKernel = Kernel(self._cvSpace, *[np.zeros(d)] * 2, 0.0)
         self._counter = 0
-        self._bwFactor = 1.0 if exploreMode else 1.0 / np.sqrt(gamma)
+        self._bwFactor = 1.0 if exploreMode else 1.0 / np.sqrt(biasFactor)
+
+        gridWidths = [cv.gridWidth for cv in variables]
+        self._widths = [] if d == 1 else gridWidths
+        self._limits = sum(([cv.minValue, cv.maxValue] for cv in variables), [])
+
+        self._force = mm.CustomCVForce(f"table({','.join(varNames)})")
+        table = getattr(mm, f"Continuous{d}DFunction")(
+            *self._widths,
+            np.full(np.prod(gridWidths), -barrier / unit.kilojoules_per_mole),
+            *self._limits,
+            numPeriodics == d,
+        )
+        for name, var in zip(varNames, variables):
+            self._force.addCollectiveVariable(name, var.force)
+        self._force.addTabulatedFunction("table", table)
+        self._force.setForceGroup(max(freeGroups))
+        system.addForce(self._force)
+
+    def _validate(self, d, biasFactor, numPeriodics, freeGroups):
+        if self.varianceFrequency and (self.frequency % self.varianceFrequency != 0):
+            raise ValueError("varianceFrequency must be a divisor of frequency")
+        if (self.saveFrequency is None) != (self.biasDir is None):
+            raise ValueError("Must specify both saveFrequency and biasDir")
+        if self.saveFrequency and (self.saveFrequency % self.frequency != 0):
+            raise ValueError("saveFrequency must be a multiple of frequency")
+        if biasFactor <= 1.0:
+            raise ValueError("OPES barrier must be greater than 1 kT")
+        if numPeriodics not in [0, d]:
+            raise ValueError("OPES cannot handle mixed periodic/non-periodic variables")
+        if not 1 <= d <= 3:
+            raise ValueError("OPES requires 1, 2, or 3 collective variables")
+        if not freeGroups:
+            raise RuntimeError("OPES requires a free force group, but all are in use.")
 
     def getFreeEnergy(self, corrected=True):
         """
@@ -485,6 +412,11 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         """
         return self._movingKernel.bandwidth**2
 
+    def _getBias(self):
+        return self._prefactor * np.logaddexp(
+            self._kde.getLogPDF() - self._kde.getLogMeanDensity(), self._logEpsilon
+        )
+
     def _updateMovingKernel(self, values):
         """
         Update the moving kernel used to estimate the bandwidth of the
@@ -519,7 +451,13 @@ class OPES:  # pylint: disable=too-many-instance-attributes
         if self.exploreMode:
             logWeight = 0
         else:
-            logWeight = self._force.getEnergy(context) / self._kbt
+            state = context.getState(
+                getEnergy=True, groups={self._force.getForceGroup()}
+            )
+            logWeight = state.getPotentialEnergy() / self._kbt
         variance = self._bwFactor * self._movingKernel.bandwidth
         self._kde.update(values, variance, logWeight)
-        self._force.update(self._kde, context)
+        self._force.getTabulatedFunction(0).setFunctionParameters(
+            *self._widths, self._getBias().ravel(), *self._limits
+        )
+        self._force.updateParametersInContext(context)
