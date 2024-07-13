@@ -12,7 +12,6 @@ from openmm.app.metadynamics import _LoadedBias
 COMPRESSION_THRESHOLD = 1.0
 STATS_WINDOW_SIZE = 10
 LIMITED_SUPPORT = False
-GLOBAL_VARIANCE = True
 UNCORRECTED_EXPLORE = False
 REWEIGHTED_FES = True
 
@@ -168,15 +167,18 @@ class Kernel:
 class OnlineKDE:
     """Online Kernel Density Estimation (KDE) for collective variables."""
 
-    def __init__(self, cvSpace):
+    def __init__(self, cvSpace, varianceScale=1.0):
         self._kernels = []
         self._cvSpace = cvSpace
-        self._counter = 0
+        self._numSamples = 0
         self._logSumW = -np.inf
         self._logSumWSq = -np.inf
         self._logPK = np.empty(0)
         self._logPG = np.full(cvSpace.gridShape, -np.inf)
         self._d = len(cvSpace.gridShape)
+        self._varianceScale = varianceScale
+        self._numVarianceSamples = 0
+        self._sumVariance = np.zeros(self._d)
 
     def __getstate__(self):
         if self._kernels:
@@ -189,43 +191,43 @@ class OnlineKDE:
             kernelData = []
         return {
             "cvSpace": self._cvSpace,
-            "counter": self._counter,
+            "numSamples": self._numSamples,
             "sumW": self._logSumW,
             "sumWSq": self._logSumWSq,
             "logPK": self._logPK,
             "logPG": self._logPG,
+            "varianceScale": self._varianceScale,
+            "numVarianceSamples": self._numVarianceSamples,
+            "sumVariance": self._sumVariance,
             "kernelData": kernelData,
         }
 
     def __setstate__(self, state):
         self.__init__(state["cvSpace"])
-        self._counter = state["counter"]
+        self._numSamples = state["numSamples"]
         self._logSumW = state["sumW"]
         self._logSumWSq = state["sumWSq"]
         self._logPK = state["logPK"]
         self._logPG = state["logPG"]
+        self._varianceScale = state["varianceScale"]
+        self._numVarianceSamples = state["numVarianceSamples"]
+        self._sumVariance = state["sumVariance"]
         self._kernels = [
             Kernel(self._cvSpace, *data) for data in zip(*state["kernelData"])
         ]
 
     def __iadd__(self, other):
+        if not np.isclose(other._varianceScale, self._varianceScale):
+            raise ValueError("Cannot add KDEs with incompatible variance scales")
+        self._numVarianceSamples += other._numVarianceSamples
+        self._sumVariance += other._sumVariance.copy()
         for k in other._kernels:
-            self.update(k.position, k.bandwidth, k.logWeight, adjustBandwidth=False)
+            self._addKernel(k.position, k.bandwidth, k.logWeight, False)
         return self
 
-    def copy(self):
-        new = OnlineKDE(self._cvSpace)
-        new._kernels = self._kernels.copy()
-        new._logSumW = self._logSumW
-        new._logSumWSq = self._logSumWSq
-        new._counter = self._counter
-        new._logPK = self._logPK.copy()
-        new._logPG = self._logPG.copy()
-        return new
-
-    def update(self, position, bandwidth, logWeight, adjustBandwidth=True):
+    def _addKernel(self, position, bandwidth, logWeight, adjustBandwidth):
         """Update the KDE by depositing a new kernel."""
-        self._counter += 1
+        self._numSamples += 1
         self._logSumW = np.logaddexp(self._logSumW, logWeight)
         self._logSumWSq = np.logaddexp(self._logSumWSq, 2 * logWeight)
         if adjustBandwidth:
@@ -258,6 +260,23 @@ class OnlineKDE:
             self._logPG = newKernel.evaluateOnGrid()
             self._logPK = np.array([newKernel.logHeight])
 
+    def copy(self):
+        new = OnlineKDE(self._cvSpace)
+        new._kernels = self._kernels.copy()
+        new._logSumW = self._logSumW
+        new._logSumWSq = self._logSumWSq
+        new._numSamples = self._numSamples
+        new._logPK = self._logPK.copy()
+        new._logPG = self._logPG.copy()
+        new._varianceScale = self._varianceScale
+        new._numVarianceSamples = self._numVarianceSamples
+        new._sumVariance = self._sumVariance
+        return new
+
+    def getVariance(self):
+        """Get the variance of the sampled variables."""
+        return self._sumVariance / self._numVarianceSamples
+
     def getLogPDF(self):
         """Get the logarithm of the probability density function (PDF) on the grid."""
         return self._logPG - self._logSumW
@@ -267,9 +286,19 @@ class OnlineKDE:
         n = len(self._kernels)
         return np.logaddexp.reduce(self._logPK) - np.log(n) - self._logSumW
 
-    def getLogNormalizingRatio(self):
+    def getLogNormalizingConstantRatio(self):
         """Get the logarithm of the ratio of the normalizing constants."""
         return self._logSumW - np.log(self._counter)
+
+    def updateVariance(self, squaredDeviationFromMean):
+        """Update the variance of the sampled variables."""
+        self._numVarianceSamples += 1
+        self._sumVariance += squaredDeviationFromMean
+
+    def update(self, position, logWeight):
+        """Update the KDE by depositing a new kernel."""
+        bandwidth = np.sqrt(self._varianceScale * self.getVariance())
+        self._addKernel(position, bandwidth, logWeight, True)
 
 
 class OPES:
@@ -340,12 +369,19 @@ class OPES:
         varNames = [f"cv{i}" for i in range(d)]
 
         self._cvSpace = CVSpace(variables)
-        self._KDE = OnlineKDE(self._cvSpace)
-        self._rwKDE = OnlineKDE(self._cvSpace) if exploreMode else self._KDE
+        varScale = 1.0 / biasFactor
+        self._KDE = OnlineKDE(self._cvSpace, 1.0 if exploreMode else varScale)
+        if exploreMode and REWEIGHTED_FES:
+            self._rwKDE = OnlineKDE(self._cvSpace, varScale)
+        else:
+            self._rwKDE = self._KDE
 
         if saveFrequency:
-            self._selfKDE = OnlineKDE(self._cvSpace)
-            self._selfRwKDE = OnlineKDE(self._cvSpace) if exploreMode else self._selfKDE
+            self._selfKDE = OnlineKDE(self._cvSpace, 1.0 if exploreMode else varScale)
+            if exploreMode and REWEIGHTED_FES:
+                self._selfRwKDE = OnlineKDE(self._cvSpace, varScale)
+            else:
+                self._selfRwKDE = self._selfKDE
             self._id = np.random.randint(0x7FFFFFFF)
             self._saveIndex = 0
             self._loadedBiases = {}
@@ -358,10 +394,19 @@ class OPES:
 
         self._adaptiveVariance = varianceFrequency is not None
         self._interval = varianceFrequency or frequency
-        self._tau = STATS_WINDOW_SIZE * frequency // varianceFrequency
-        self._counter = 0
-        self._sampleMean = np.zeros(d)
-        self._sampleVariance = np.zeros(d)
+        if self._adaptiveVariance:
+            self._tau = STATS_WINDOW_SIZE * frequency // varianceFrequency
+            self._counter = 0
+            self._sampleMean = np.zeros(d)
+        else:
+            sqdev = np.array([cv.biasWidth ** 2 for cv in variables])
+            self._KDE.updateVariance(sqdev)
+            if exploreMode and REWEIGHTED_FES:
+                self._rwKDE.updateVariance(sqdev)
+            if saveFrequency:
+                self._selfKDE.updateVariance(sqdev)
+                if exploreMode and REWEIGHTED_FES:
+                    self._selfRwKDE.updateVariance(sqdev)
 
         gridWidths = [cv.gridWidth for cv in variables]
         self._widths = [] if d == 1 else gridWidths
@@ -407,24 +452,26 @@ class OPES:
         delta = self._cvSpace.displacement(self._sampleMean, values)
         x = 1 / min(self._tau, self._counter)
         self._sampleMean = self._cvSpace.endpoint(self._sampleMean, x * delta)
-        delta *= self._cvSpace.displacement(self._sampleMean, values)
-        if GLOBAL_VARIANCE:
-            x = 1 / (self._tau + self._counter)
-        self._sampleVariance += x * (delta - self._sampleVariance)
+        sqdev = delta * self._cvSpace.displacement(self._sampleMean, values)
+        self._KDE.updateVariance(sqdev)
+        if self.exploreMode and REWEIGHTED_FES:
+            self._rwKDE.updateVariance(sqdev)
+        if self.saveFrequency:
+            self._selfKDE.updateVariance(sqdev)
+            if self.exploreMode and REWEIGHTED_FES:
+                self._selfRwKDE.updateVariance(sqdev)
 
     def _addKernel(self, values, energy, context):
         """Add a kernel to the PDF estimate and update the bias potential."""
-        bandwidth = np.sqrt(self._sampleVariance)
         if self.exploreMode:
-            self._KDE.update(values, bandwidth, 0)
+            self._KDE.update(values, 0)
             if self.saveFrequency:
-                self._selfKDE.update(values, bandwidth, 0)
+                self._selfKDE.update(values, 0)
 
         logWeight = energy / self._kbt
-        bandwidth /= np.sqrt(self._biasFactor)
-        self._rwKDE.update(values, bandwidth, logWeight)
+        self._rwKDE.update(values, logWeight)
         if self.saveFrequency:
-            self._selfRwKDE.update(values, bandwidth, logWeight)
+            self._selfRwKDE.update(values, logWeight)
 
         self._force.getTabulatedFunction(0).setFunctionParameters(
             *self._widths, self._getBias().ravel(), *self._limits
@@ -491,7 +538,7 @@ class OPES:
         biasedFreeEnergy = -self._kbt * self._KDE.getLogPDF()
         if UNCORRECTED_EXPLORE:
             return biasedFreeEnergy * self._biasFactor
-        variation = self._kbt * self._rwKDE.getLogNormalizingRatio()
+        variation = self._kbt * self._rwKDE.getLogNormalizingConstantRatio()
         return biasedFreeEnergy - self._getBias() * unit.kilojoules_per_mole + variation
 
     def getAverageDensity(self):
@@ -558,4 +605,4 @@ class OPES:
 
     def getVariance(self):
         """Get the variance of the probability distribution estimate."""
-        return self._sampleVariance
+        return self._KDE.getVariance()
