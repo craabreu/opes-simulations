@@ -12,7 +12,7 @@ from openmm.app.metadynamics import _LoadedBias
 COMPRESSION_THRESHOLD = 1.0
 STATS_WINDOW_SIZE = 10
 LIMITED_SUPPORT = False
-UNCORRECTED_EXPLORE = False
+UNCORRECTED_OPES_EXPLORE = False
 REWEIGHTED_FES = True
 
 
@@ -366,31 +366,24 @@ class OPES:
         prefactor = (1 - 1 / biasFactor) * kbt
         if exploreMode:
             prefactor *= biasFactor
-        varNames = [f"cv{i}" for i in range(d)]
-
-        self._cvSpace = CVSpace(variables)
-        varScale = 1.0 / biasFactor
-        self._KDE = OnlineKDE(self._cvSpace, 1.0 if exploreMode else varScale)
-        if exploreMode and REWEIGHTED_FES:
-            self._rwKDE = OnlineKDE(self._cvSpace, varScale)
-        else:
-            self._rwKDE = self._KDE
-
-        if saveFrequency:
-            self._selfKDE = OnlineKDE(self._cvSpace, 1.0 if exploreMode else varScale)
-            if exploreMode and REWEIGHTED_FES:
-                self._selfRwKDE = OnlineKDE(self._cvSpace, varScale)
-            else:
-                self._selfRwKDE = self._selfKDE
-            self._id = np.random.randint(0x7FFFFFFF)
-            self._saveIndex = 0
-            self._loadedBiases = {}
-            self._syncWithDisk()
-
         self._kbt = kbt.in_units_of(unit.kilojoules_per_mole)
         self._biasFactor = biasFactor
         self._prefactor = prefactor / unit.kilojoules_per_mole
         self._logEpsilon = -barrier / prefactor
+
+        self._kde = {}
+        varScale = 1.0 / biasFactor
+        self._cvSpace = CVSpace(variables)
+        self._cases = ("total",) + ("self",) * bool(saveFrequency)
+        for case in self._cases:
+            self._kde[case] = OnlineKDE(self._cvSpace, 1.0 if exploreMode else varScale)
+            if exploreMode and REWEIGHTED_FES:
+                self._kde[case + "_reweighted"] = OnlineKDE(self._cvSpace, varScale)
+        if saveFrequency:
+            self._id = np.random.randint(0x7FFFFFFF)
+            self._saveIndex = 0
+            self._loadedBiases = {}
+            self._syncWithDisk()
 
         self._adaptiveVariance = varianceFrequency is not None
         self._interval = varianceFrequency or frequency
@@ -399,28 +392,24 @@ class OPES:
             self._counter = 0
             self._sampleMean = np.zeros(d)
         else:
-            sqdev = np.array([cv.biasWidth ** 2 for cv in variables])
-            self._KDE.updateVariance(sqdev)
-            if exploreMode and REWEIGHTED_FES:
-                self._rwKDE.updateVariance(sqdev)
-            if saveFrequency:
-                self._selfKDE.updateVariance(sqdev)
-                if exploreMode and REWEIGHTED_FES:
-                    self._selfRwKDE.updateVariance(sqdev)
+            sqdev = np.array([cv.biasWidth**2 for cv in variables])
+            for kde in self._kde.values():
+                kde.updateVariance(sqdev)
 
         gridWidths = [cv.gridWidth for cv in variables]
         self._widths = [] if d == 1 else gridWidths
         self._limits = sum(([cv.minValue, cv.maxValue] for cv in variables), [])
 
-        self._force = mm.CustomCVForce(f"table({','.join(varNames)})")
+        energyFunction = "table(" + ",".join(f"cv{i}" for i in range(d)) + ")"
+        self._force = mm.CustomCVForce(energyFunction)
+        for i, var in enumerate(variables):
+            self._force.addCollectiveVariable(f"cv{i}", var.force)
         table = getattr(mm, f"Continuous{d}DFunction")(
             *self._widths,
             np.full(np.prod(gridWidths), -barrier / unit.kilojoules_per_mole),
             *self._limits,
             numPeriodics == d,
         )
-        for name, var in zip(varNames, variables):
-            self._force.addCollectiveVariable(name, var.force)
         self._force.addTabulatedFunction("table", table)
         self._force.setForceGroup(max(freeGroups))
         system.addForce(self._force)
@@ -442,8 +431,9 @@ class OPES:
             raise RuntimeError("OPES requires a free force group, but all are in use.")
 
     def _getBias(self):
+        kde = self._kde["total"]
         return self._prefactor * np.logaddexp(
-            self._KDE.getLogPDF() - self._KDE.getLogMeanDensity(), self._logEpsilon
+            kde.getLogPDF() - kde.getLogMeanDensity(), self._logEpsilon
         )
 
     def _updateSampleStats(self, values):
@@ -453,26 +443,16 @@ class OPES:
         x = 1 / min(self._tau, self._counter)
         self._sampleMean = self._cvSpace.endpoint(self._sampleMean, x * delta)
         sqdev = delta * self._cvSpace.displacement(self._sampleMean, values)
-        self._KDE.updateVariance(sqdev)
-        if self.exploreMode and REWEIGHTED_FES:
-            self._rwKDE.updateVariance(sqdev)
-        if self.saveFrequency:
-            self._selfKDE.updateVariance(sqdev)
-            if self.exploreMode and REWEIGHTED_FES:
-                self._selfRwKDE.updateVariance(sqdev)
+        for kde in self._kde.values():
+            kde.updateVariance(sqdev)
 
     def _addKernel(self, values, energy, context):
         """Add a kernel to the PDF estimate and update the bias potential."""
-        if self.exploreMode:
-            self._KDE.update(values, 0)
-            if self.saveFrequency:
-                self._selfKDE.update(values, 0)
-
         logWeight = energy / self._kbt
-        self._rwKDE.update(values, logWeight)
-        if self.saveFrequency:
-            self._selfRwKDE.update(values, logWeight)
-
+        for case in self._cases:
+            self._kde[case].update(values, 0 if self.exploreMode else logWeight)
+            if self.exploreMode and REWEIGHTED_FES:
+                self._kde[f"{case}_reweighted"].update(values, logWeight)
         self._force.getTabulatedFunction(0).setFunctionParameters(
             *self._widths, self._getBias().ravel(), *self._limits
         )
@@ -533,19 +513,20 @@ class OPES:
         of collective variables. The values are in kJ/mole. The i'th position along an
         axis corresponds to minValue + i*(maxValue-minValue)/gridWidth.
         """
-        if not self.exploreMode or REWEIGHTED_FES:
-            return -self._kbt * self._rwKDE.getLogPDF()
-        biasedFreeEnergy = -self._kbt * self._KDE.getLogPDF()
-        if UNCORRECTED_EXPLORE:
-            return biasedFreeEnergy * self._biasFactor
-        variation = self._kbt * self._rwKDE.getLogNormalizingConstantRatio()
-        return biasedFreeEnergy - self._getBias() * unit.kilojoules_per_mole + variation
+        if self.exploreMode and REWEIGHTED_FES:
+            return -self._kbt * self._kde["total_reweighted"].getLogPDF()
+        freeEnergy = -self._kbt * self._kde["total"].getLogPDF()
+        if not self.exploreMode:
+            return freeEnergy
+        if UNCORRECTED_OPES_EXPLORE:
+            return freeEnergy * self._biasFactor
+        return freeEnergy - self._getBias() * unit.kilojoules_per_mole
 
     def getAverageDensity(self):
         """
         Get the average density of the system as a function of the collective variables.
         """
-        return np.exp(self._KDE.getLogMeanDensity())
+        return np.exp(self._kde["total"].getLogMeanDensity())
 
     def getCollectiveVariables(self, simulation):
         """
@@ -605,4 +586,4 @@ class OPES:
 
     def getVariance(self):
         """Get the variance of the probability distribution estimate."""
-        return self._KDE.getVariance()
+        return self._kde["total"].getVariance()
