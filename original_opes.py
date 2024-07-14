@@ -2,6 +2,7 @@ import functools
 import os
 import pickle
 import re
+import warnings
 from collections import namedtuple
 
 import numpy as np
@@ -16,7 +17,7 @@ UNCORRECTED_OPES_EXPLORE = False
 REWEIGHTED_FES = True
 
 
-_CV = namedtuple("_Variable", ["minValue", "maxValue", "gridWidth", "periodic"])
+_CV = namedtuple("_CV", ["minValue", "maxValue", "gridWidth", "periodic"])
 
 
 def logsubexp(x, y):
@@ -463,13 +464,13 @@ class OPES:
         Save biases to disk, and check for updated files created by other processes.
         """
 
-        oldName = os.path.join(self.biasDir, f"bias_{self._id}_{self._saveIndex}.pkl")
+        oldName = os.path.join(self.biasDir, f"kde_{self._id}_{self._saveIndex}.pkl")
         self._saveIndex += 1
         tempName = os.path.join(self.biasDir, f"temp_{self._id}_{self._saveIndex}.pkl")
-        fileName = os.path.join(self.biasDir, f"bias_{self._id}_{self._saveIndex}.pkl")
-        data = [self._selfKDE]
-        if self.exploreMode:
-            data.append(self._selfRwKDE)
+        fileName = os.path.join(self.biasDir, f"kde_{self._id}_{self._saveIndex}.pkl")
+        data = {"self": self._kde["self"]}
+        if self.exploreMode and REWEIGHTED_FES:
+            data["self_reweighted"] = self._kde["self_reweighted"]
         with open(tempName, "wb") as file:
             pickle.dump(data, file)
         os.rename(tempName, fileName)
@@ -477,7 +478,7 @@ class OPES:
             os.remove(oldName)
 
         fileLoaded = False
-        pattern = re.compile(r"bias_(.*)_(.*)\.pkl")
+        pattern = re.compile(r"kde_(.*)_(.*)\.pkl")
         for filename in os.listdir(self.biasDir):
             match = pattern.match(filename)
             if match is not None:
@@ -495,15 +496,19 @@ class OPES:
                         )
                         fileLoaded = True
                     except IOError:
-                        pass
+                        warnings.warn(
+                            f"The file {filename} seems to have been deleted. Using"
+                            "the lastest loaded data from the same process."
+                        )
 
         if fileLoaded:
-            self._KDE = self._selfKDE.copy()
-            self._rwKDE = self._selfRwKDE.copy() if self.exploreMode else self._KDE
+            self._kde["total"] = self._kde["self"].copy()
+            if self.exploreMode and REWEIGHTED_FES:
+                self._kde["total_reweighted"] = self._kde["self_reweighted"].copy()
             for bias in self._loadedBiases.values():
-                self._KDE += bias.bias[0]
-                if self.exploreMode:
-                    self._rwKDE += bias.bias[1]
+                self._kde["total"] += bias.bias["self"]
+                if self.exploreMode and REWEIGHTED_FES:
+                    self._kde["total_reweighted"] += bias.bias["self_reweighted"]
 
     def getFreeEnergy(self):
         """
