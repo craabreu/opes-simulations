@@ -1,4 +1,3 @@
-import argparse
 import multiprocessing as mp
 from functools import partial
 
@@ -6,17 +5,10 @@ import numpy as np
 import openmm as mm
 from openmm import app, unit
 
-from openmmopes import OPES as OpenMMOPES
-from original_opes import OPES as OriginalOPES
-
-# from new_opes import OPES as OriginalOPES
+from opes import OPES
 
 
-def write(file, *args):
-    file.write(",".join([str(x) for x in args]) + "\n")
-
-
-def run_opes(index: int, method: str, nstep: int, original: bool):
+def simulate_modified_wolfe_quapp(index: int, method: str, prefix: str = "") -> None:
 
     if method not in ["metad", "opes", "opes-explore"]:
         raise ValueError("Invalid method")
@@ -35,6 +27,7 @@ def run_opes(index: int, method: str, nstep: int, original: bool):
         "+ 18.5598"
     )
 
+    nstep = 30000000
     mass = 1.0
     tstep = 0.005
     kb = unit.MOLAR_GAS_CONSTANT_R.value_in_unit_system(unit.md_unit_system)
@@ -67,14 +60,14 @@ def run_opes(index: int, method: str, nstep: int, original: bool):
 
     explore = method == "opes-explore"
     if method.startswith("opes"):
-        sampler = (OriginalOPES if original else OpenMMOPES)(
+        sampler = OPES(
             system,
             [bias_variable],
             temperature,
             bias_factor,
             pace,
-            explore,
             variance_pace,
+            explore,
         )
     elif method == "metad":
         sampler = app.Metadynamics(
@@ -95,14 +88,14 @@ def run_opes(index: int, method: str, nstep: int, original: bool):
     context.setVelocitiesToTemperature(temperature)
 
     num_cycles = nstep // pace
-    filename = ("original-" if original else "") + f"{method}_{index:02d}.csv"
+    filename = prefix + "-" * bool(prefix) + f"{prefix}{method}_{index:02d}.csv"
     percentage = 0
     n = 75
-    z = znew = 0
+    z = 0
     var = sigma**2
     with open(filename, "w", encoding="utf-8") as file:
-        file.write("step,x,y,variance,delta_f,z,znew\n")
-        print("step, x, y, variance, delta_f, z, znew, percentage")
+        file.write("time,x,y,variance,z,delta_f\n")
+        print("proc, time, x, y, variance, z, delta_f, percentage")
         for cycle in range(num_cycles):
             sampler.step(simulation, pace)
             state = context.getState(getPositions=True)
@@ -112,46 +105,35 @@ def run_opes(index: int, method: str, nstep: int, original: bool):
             delta_f = np.logaddexp.reduce(-fes[:n]) - np.logaddexp.reduce(-fes[n:])
             if method != "metad":
                 z = sampler.getAverageDensity()
-                # znew = sampler.getInvAverageInvDensity()
                 var = sampler.getVariance().item()
-            write(file, cycle * pace, *map(np.float32, [x, y, var, delta_f, z, znew]))
+            values = tuple(
+                map(np.float32, [(cycle + 1) * pace * tstep, x, y, var, z, delta_f])
+            )
+            file.write(",".join(map(str, values)) + "\n")
             if (cycle + 1) % (num_cycles // 100) == 0:
                 percentage += 1
-                print(index, cycle + 1, x, y, var, delta_f, z, znew, f"{percentage}%")
+                print(index, *values, f"{percentage}%")
 
-    filename = ("original-" if original else "") + f"{method}_profile_{index:02d}.csv"
+    filename = f"profile_{filename}"
     fes = sampler.getFreeEnergy() / unit.kilojoules_per_mole
     fes -= fes.min()
     with open(filename, "w", encoding="utf-8") as file:
         file.write("x,fes\n")
         for x, f in zip(np.linspace(grid_min, grid_max, grid_bin), fes):
-            write(file, x, f)
+            file.write(",".join(map(str, [x, f])) + "\n")
+
+
+def parallel_run(method: str, prefix: str = "", i0: int = 0, np: int = 1) -> None:
+    if np == 1:
+        simulate_modified_wolfe_quapp(i0, method, prefix)
+    else:
+        with mp.Pool(processes=np) as pool:
+            pool.map(
+                partial(simulate_modified_wolfe_quapp, method=method, prefix=prefix),
+                range(i0, i0 + np),
+            )
+    print("Done!")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run OPES workflow")
-    parser.add_argument("method", type=str, help="Method to use in the workflow")
-    parser.add_argument(
-        "--steps", type=int, default=30000000, help="Number of steps to run"
-    )
-    parser.add_argument(
-        "--np", type=int, default=1, help="Total number of parallel processes"
-    )
-    parser.add_argument(
-        "--i0", type=int, default=0, help="Index of the first parallel process"
-    )
-    parser.add_argument(
-        "--original", action="store_true", help="Use the original OPES algorithm"
-    )
-    args = parser.parse_args()
-
-    if args.np == 1:
-        run_opes(0, args.method, args.steps, args.original)
-    else:
-        parallel_run_opes = partial(
-            run_opes, method=args.method, nstep=args.steps, original=args.original
-        )
-        with mp.Pool(processes=args.np) as pool:
-            pool.map(parallel_run_opes, range(args.i0, args.i0 + args.np))
-
-    print("Done!")
+    parallel_run("opes")

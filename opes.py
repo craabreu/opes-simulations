@@ -41,6 +41,9 @@ class OPES:
     frequency
         The interval in time steps at which to add a new kernel to the probability
         distribution estimate.
+    varianceFrequency
+        The interval in time steps at which to update the variance of the collective
+        variables.
     exploreMode
         Whether to apply the OPES-Explore variant.
     """
@@ -52,8 +55,8 @@ class OPES:
         temperature,
         barrier,
         frequency,
+        varianceFrequency,
         exploreMode=False,
-        varianceFrequency=None,
         saveFrequency=None,
         biasDir=None,
     ):
