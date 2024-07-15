@@ -1,5 +1,4 @@
-import multiprocessing as mp
-from functools import partial
+import os
 
 import numpy as np
 import openmm as mm
@@ -7,8 +6,10 @@ from openmm import app, unit
 
 from opes import OPES
 
+VARIANCE_PACE: int = 25
 
-def simulate_modified_wolfe_quapp(index: int, method: str, prefix: str = "") -> None:
+
+def modified_wolfe_quapp(index: int, method: str, directory: str = ".") -> None:
 
     if method not in ["metad", "opes", "opes-explore"]:
         raise ValueError("Invalid method")
@@ -39,7 +40,8 @@ def simulate_modified_wolfe_quapp(index: int, method: str, prefix: str = "") -> 
     pace = 500
     sigma = 0.185815
     bias_factor = 10
-    variance_pace = 1
+    variance_pace = VARIANCE_PACE
+    num_outputs = 1000
 
     grid_min = -3
     grid_max = 3
@@ -88,7 +90,9 @@ def simulate_modified_wolfe_quapp(index: int, method: str, prefix: str = "") -> 
     context.setVelocitiesToTemperature(temperature)
 
     num_cycles = nstep // pace
-    filename = prefix + "-" * bool(prefix) + f"{prefix}{method}_{index:02d}.csv"
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    filename = f"{directory}/{method}_{index:02d}.csv"
     percentage = 0
     n = 75
     z = 0
@@ -109,31 +113,16 @@ def simulate_modified_wolfe_quapp(index: int, method: str, prefix: str = "") -> 
             values = tuple(
                 map(np.float32, [(cycle + 1) * pace * tstep, x, y, var, z, delta_f])
             )
-            file.write(",".join(map(str, values)) + "\n")
+            if (cycle + 1) % (num_cycles // num_outputs) == 0:
+                file.write(",".join(map(str, values)) + "\n")
             if (cycle + 1) % (num_cycles // 100) == 0:
                 percentage += 1
                 print(index, *values, f"{percentage}%")
 
-    filename = f"profile_{filename}"
+    filename = f"{directory}/profile_{method}_{index:02d}.csv"
     fes = sampler.getFreeEnergy() / unit.kilojoules_per_mole
     fes -= fes.min()
     with open(filename, "w", encoding="utf-8") as file:
         file.write("x,fes\n")
         for x, f in zip(np.linspace(grid_min, grid_max, grid_bin), fes):
             file.write(",".join(map(str, [x, f])) + "\n")
-
-
-def parallel_run(method: str, prefix: str = "", i0: int = 0, np: int = 1) -> None:
-    if np == 1:
-        simulate_modified_wolfe_quapp(i0, method, prefix)
-    else:
-        with mp.Pool(processes=np) as pool:
-            pool.map(
-                partial(simulate_modified_wolfe_quapp, method=method, prefix=prefix),
-                range(i0, i0 + np),
-            )
-    print("Done!")
-
-
-if __name__ == "__main__":
-    parallel_run("opes")
