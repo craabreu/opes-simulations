@@ -11,7 +11,7 @@ from openmm.app.metadynamics import _LoadedBias
 from online_kde import CVSpace, OnlineKDE
 
 STATS_WINDOW_SIZE = 10
-UNCORRECTED_OPES_EXPLORE = False
+CORRECTED_OPES_EXPLORE = True
 REWEIGHTED_FES = True
 
 
@@ -239,7 +239,7 @@ class OPES:
         freeEnergy = -self._kbt * self._kde["total"].getLogPDF()
         if not self.exploreMode:
             return freeEnergy
-        if UNCORRECTED_OPES_EXPLORE:
+        if not CORRECTED_OPES_EXPLORE:
             return freeEnergy * self._biasFactor
         return freeEnergy - self._getBias() * unit.kilojoules_per_mole
 

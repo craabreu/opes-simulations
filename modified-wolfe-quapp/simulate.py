@@ -1,5 +1,7 @@
 import os
+from timeit import default_timer as timer
 
+import gzip
 import numpy as np
 import openmm as mm
 from openmm import app, unit
@@ -9,8 +11,8 @@ from opes import OPES
 VARIANCE_PACE: int = 25
 
 
-def modified_wolfe_quapp(index: int, method: str, directory: str = ".") -> None:
-
+def modified_wolfe_quapp(index: int, method: str, directory: str = ".") -> float:
+    start = timer()
     if method not in ["metad", "opes", "opes-explore"]:
         raise ValueError("Invalid method")
 
@@ -41,7 +43,6 @@ def modified_wolfe_quapp(index: int, method: str, directory: str = ".") -> None:
     sigma = 0.185815
     bias_factor = 10
     variance_pace = VARIANCE_PACE
-    num_outputs = 1000
 
     grid_min = -3
     grid_max = 3
@@ -90,14 +91,13 @@ def modified_wolfe_quapp(index: int, method: str, directory: str = ".") -> None:
     context.setVelocitiesToTemperature(temperature)
 
     num_cycles = nstep // pace
-    if not os.path.exists(directory):
-        os.makedirs(directory)
-    filename = f"{directory}/{method}_{index:02d}.csv"
+    os.makedirs(directory, exist_ok=True)
+    filename = f"{directory}/{method}_{index:02d}.csv.gz"
     percentage = 0
-    n = 75
+    n = grid_bin // 2
     z = 0
     var = sigma**2
-    with open(filename, "w", encoding="utf-8") as file:
+    with gzip.open(filename, "wt") as file:
         file.write("time,x,y,variance,z,delta_f\n")
         print("proc, time, x, y, variance, z, delta_f, percentage")
         for cycle in range(num_cycles):
@@ -113,8 +113,7 @@ def modified_wolfe_quapp(index: int, method: str, directory: str = ".") -> None:
             values = tuple(
                 map(np.float32, [(cycle + 1) * pace * tstep, x, y, var, z, delta_f])
             )
-            if (cycle + 1) % (num_cycles // num_outputs) == 0:
-                file.write(",".join(map(str, values)) + "\n")
+            file.write(",".join(map(str, values)) + "\n")
             if (cycle + 1) % (num_cycles // 100) == 0:
                 percentage += 1
                 print(index, *values, f"{percentage}%")
@@ -126,3 +125,5 @@ def modified_wolfe_quapp(index: int, method: str, directory: str = ".") -> None:
         file.write("x,fes\n")
         for x, f in zip(np.linspace(grid_min, grid_max, grid_bin), fes):
             file.write(",".join(map(str, [x, f])) + "\n")
+
+    return timer() - start

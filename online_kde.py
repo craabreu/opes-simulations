@@ -4,7 +4,8 @@ from collections import namedtuple
 import numpy as np
 
 COMPRESSION_THRESHOLD = 1.0
-LIMITED_SUPPORT = False
+BOUNDED_KERNELS = False
+KEEP_GRID_UNCOMPRESSED = False
 
 
 _CV = namedtuple("_CV", ["minValue", "maxValue", "gridWidth", "periodic"])
@@ -96,7 +97,7 @@ class Kernel:
     def _computeLogHeight(self):
         if np.any(self.bandwidth == 0):
             return -np.inf
-        const = np.log(559872 / 35) if LIMITED_SUPPORT else np.log(2 * np.pi) / 2
+        const = np.log(559872 / 35) if BOUNDED_KERNELS else np.log(2 * np.pi) / 2
         d = self.cvSpace.numDimensions
         return self.logWeight - d * const - np.sum(np.log(self.bandwidth))
 
@@ -105,7 +106,7 @@ class Kernel:
 
     @staticmethod
     def _exponents(x):
-        if LIMITED_SUPPORT:
+        if BOUNDED_KERNELS:
             values = 9 - x**2
             mask = values > 0
             values[mask] = 4 * np.log(values[mask])
@@ -227,6 +228,8 @@ class OnlineKDE:
             bandwidth = bandwidth * silverman
         newKernel = Kernel(self._cvSpace, position, bandwidth, logWeight)
         if self._kernels:
+            if KEEP_GRID_UNCOMPRESSED:
+                self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
             points = np.stack([k.position for k in self._kernels])
             index, minSqDist = newKernel.findNearest(points)
             toRemove = []
@@ -235,13 +238,15 @@ class OnlineKDE:
                 newKernel.merge(self._kernels[index])
                 index, minSqDist = newKernel.findNearest(points, toRemove)
             self._logPK = np.logaddexp(self._logPK, newKernel.evaluate(points))
-            self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
+            if not KEEP_GRID_UNCOMPRESSED:
+                self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
             if toRemove:
                 toRemove = sorted(toRemove, reverse=True)
                 for index in toRemove:
                     k = self._kernels.pop(index)
                     self._logPK = logsubexp(self._logPK, k.evaluate(points))
-                    self._logPG = logsubexp(self._logPG, k.evaluateOnGrid())
+                    if not KEEP_GRID_UNCOMPRESSED:
+                        self._logPG = logsubexp(self._logPG, k.evaluateOnGrid())
                 self._logPK = np.delete(self._logPK, toRemove)
             self._kernels.append(newKernel)
             logNewP = [k.evaluate(newKernel.position) for k in self._kernels]
