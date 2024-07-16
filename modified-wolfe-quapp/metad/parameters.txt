@@ -1,0 +1,7 @@
+method=metad
+simulate.VARIANCE_PACE=25
+opes.REWEIGHTED_FES=True
+opes.CORRECTED_OPES_EXPLORE=True
+online_kde.BOUNDED_KERNELS=False
+online_kde.KEEP_GRID_UNCOMPRESSED=False
+execution_times=71.282 +/- 1.796 s
