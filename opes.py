@@ -46,6 +46,8 @@ class OPES:
         variables.
     exploreMode
         Whether to apply the OPES-Explore variant.
+    extraBias
+        An OpenMM Force to be added to the bias potential.
     """
 
     def __init__(
@@ -57,6 +59,7 @@ class OPES:
         frequency,
         varianceFrequency,
         exploreMode=False,
+        extraBias=None,
         saveFrequency=None,
         biasDir=None,
     ):
@@ -68,8 +71,9 @@ class OPES:
         self.temperature = temperature
         self.barrier = barrier
         self.frequency = frequency
-        self.exploreMode = exploreMode
         self.varianceFrequency = varianceFrequency
+        self.exploreMode = exploreMode
+        self.extraBias = extraBias
         self.saveFrequency = saveFrequency
         self.biasDir = biasDir
 
@@ -118,9 +122,13 @@ class OPES:
         self._limits = sum(([cv.minValue, cv.maxValue] for cv in variables), [])
 
         energyFunction = "table(" + ",".join(f"cv{i}" for i in range(d)) + ")"
+        if extraBias is not None:
+            energyFunction += "+extraBias"
         self._force = mm.CustomCVForce(energyFunction)
         for i, var in enumerate(variables):
             self._force.addCollectiveVariable(f"cv{i}", var.force)
+        if extraBias is not None:
+            self._force.addCollectiveVariable("extraBias", extraBias)
         table = getattr(mm, f"Continuous{d}DFunction")(
             *self._widths,
             np.full(np.prod(gridWidths), -barrier / unit.kilojoules_per_mole),
@@ -258,7 +266,8 @@ class OPES:
         simulation
             The Simulation to query.
         """
-        return self._force.getCollectiveVariableValues(simulation.context)
+        cvs = self._force.getCollectiveVariableValues(simulation.context)
+        return cvs if self.extraBias is None else cvs[:-1]
 
     def step(self, simulation, steps):
         """

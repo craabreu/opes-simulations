@@ -8,7 +8,7 @@ from openmm import app, unit
 
 from opes import OPES
 
-VARIANCE_PACE: int = 25
+VARIANCE_PACE: int = 50
 
 
 def modified_wolfe_quapp(index: int, method: str, directory: str = ".") -> float:
