@@ -1,0 +1,133 @@
+import os
+from timeit import default_timer as timer
+
+import gzip
+import numpy as np
+import openmm as mm
+from openmm import app, unit
+
+from opes import OPES
+
+VARIANCE_PACE: int = 50
+
+
+def muller_brown(index: int, method: str, directory: str = ".") -> float:
+    start = timer()
+    if method not in ["metad", "opes", "opes-explore"]:
+        raise ValueError("Invalid method")
+
+    muller_brown_potential_str = (
+        "0.15*("
+        "  -200*exp(-(x-1)^2-10*y^2)"
+        "  -100*exp(-x^2-10*(y-0.5)^2)"
+        "  -170*exp(-6.5*(0.5+x)^2+11*(x+0.5)*(y-1.5)-6.5*(y-1.5)^2)"
+        "  +15*exp(0.7*(1+x)^2+0.6*(x+1)*(y-1)+0.7*(y-1)^2)"
+        "  +146.7"
+        ")"
+    )
+
+    nstep = 200000000
+    mass = 1.0
+    tstep = 0.005
+    kb = unit.MOLAR_GAS_CONSTANT_R.value_in_unit_system(unit.md_unit_system)
+    temperature = 1.0 / kb
+    friction = 10.0
+    reference_position = (-0.57537868, 1.4223848)
+
+    height = 1
+    pace = 500
+    sigma = 0.1
+    bias_factor = 20
+    variance_pace = VARIANCE_PACE
+
+    grid_min = -2
+    grid_max = 2
+    grid_bin = 401
+
+    wall_kappa = 1000
+    xmin = -1.3
+    xmax = 1
+    wall_potential_str = (
+        f"{wall_kappa}*((step(dmin)*dmin)^2+(step(dmax)*dmax)^2)"
+        f";dmin={xmin}-x"
+        f";dmax=x-{xmax}"
+    )
+
+    system = mm.System()
+    system.addParticle(mass)
+    force = mm.CustomExternalForce(f"{muller_brown_potential_str}+{wall_potential_str}")
+    force.addParticle(0, [])
+    system.addForce(force)
+
+    bias_force = mm.CustomExternalForce("x")
+    bias_force.addParticle(0, [])
+
+    bias_variable = app.BiasVariable(
+        bias_force, grid_min, grid_max, sigma, False, grid_bin
+    )
+
+    explore = method == "opes-explore"
+    if method.startswith("opes"):
+        sampler = OPES(
+            system,
+            [bias_variable],
+            temperature,
+            bias_factor,
+            pace,
+            variance_pace,
+            explore,
+        )
+    elif method == "metad":
+        sampler = app.Metadynamics(
+            system, [bias_variable], temperature, bias_factor, height, pace
+        )
+    else:
+        raise ValueError("Invalid method")
+
+    topology = app.Topology()
+    topology.addAtom("ATOM", None, topology.addResidue("MOL", topology.addChain()))
+
+    platform = mm.Platform.getPlatformByName("Reference")
+    integrator = mm.LangevinMiddleIntegrator(temperature, friction, tstep)
+    simulation = app.Simulation(topology, system, integrator, platform)
+    context = simulation.context
+    initial_position = np.random.normal(reference_position, sigma, 2)
+    context.setPositions([(*initial_position, 0)])
+    context.setVelocitiesToTemperature(temperature)
+
+    num_cycles = nstep // pace
+    os.makedirs(directory, exist_ok=True)
+    filename = f"{directory}/{method}_{index:02d}.csv.gz"
+    percentage = 0
+    n = grid_bin // 2
+    z = 0
+    var = sigma**2
+    with gzip.open(filename, "wt") as file:
+        file.write("time,x,y,variance,z,delta_f\n")
+        print("proc, time, x, y, variance, z, delta_f, percentage")
+        for cycle in range(num_cycles):
+            sampler.step(simulation, pace)
+            time = (cycle + 1) * pace * tstep
+            state = context.getState(getPositions=True)
+            positions = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
+            x, y, _ = positions.flatten()
+            fes = sampler.getFreeEnergy() / unit.kilojoules_per_mole
+            delta_f = np.logaddexp.reduce(-fes[:n]) - np.logaddexp.reduce(-fes[n:])
+            if method != "metad":
+                z = sampler.getAverageDensity()
+                var = sampler.getVariance().item()
+            values = tuple(map(np.float32, [time, x, y, var, z, delta_f]))
+            file.write(",".join(map(str, values)) + "\n")
+            if (cycle + 1) % (num_cycles // 100) == 0:
+                percentage += 1
+                print(index, *values, f"{percentage}%")
+
+    filename = f"{directory}/profile_{method}_{index:02d}.csv"
+    fes = sampler.getFreeEnergy() / unit.kilojoules_per_mole
+    fes -= fes.min()
+    with open(filename, "w", encoding="utf-8") as file:
+        file.write("x,fes\n")
+        for x, f in zip(np.linspace(grid_min, grid_max, grid_bin), fes):
+            file.write(",".join(map(str, [x, f])) + "\n")
+
+    return timer() - start
