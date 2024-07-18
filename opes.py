@@ -44,6 +44,8 @@ class OPES:
     varianceFrequency
         The interval in time steps at which to update the variance of the collective
         variables.
+    biasFactor
+        The bias factor to use. If None, then barrier / kT is used.
     exploreMode
         Whether to apply the OPES-Explore variant.
     extraBias
@@ -58,6 +60,7 @@ class OPES:
         barrier,
         frequency,
         varianceFrequency,
+        biasFactor=None,
         exploreMode=False,
         extraBias=None,
         saveFrequency=None,
@@ -72,6 +75,7 @@ class OPES:
         self.barrier = barrier
         self.frequency = frequency
         self.varianceFrequency = varianceFrequency
+        self.biasFactor = biasFactor
         self.exploreMode = exploreMode
         self.extraBias = extraBias
         self.saveFrequency = saveFrequency
@@ -79,7 +83,7 @@ class OPES:
 
         d = len(variables)
         kbt = unit.MOLAR_GAS_CONSTANT_R * temperature
-        biasFactor = barrier / kbt
+        biasFactor = barrier / kbt if biasFactor is None else biasFactor
         numPeriodics = sum(v.periodic for v in variables)
         freeGroups = set(range(32)) - set(f.getForceGroup() for f in system.getForces())
         self._validate(d, biasFactor, numPeriodics, freeGroups)
