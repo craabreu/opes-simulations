@@ -293,7 +293,6 @@ class OnlineKDE:
 
     def update(self, position, logWeight, variance=None):
         """Update the KDE by depositing a new kernel."""
-        if variance is None:
-            variance = self.getVariance()
+        variance = self.getVariance() if variance is None else np.asarray(variance)
         bandwidth = np.sqrt(self._varianceScale * variance)
         self._addKernel(position, bandwidth, logWeight, True)
