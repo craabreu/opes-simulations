@@ -257,7 +257,7 @@ class OnlineKDE:
             self._logPK = np.array([newKernel.logHeight])
 
     def copy(self):
-        new = OnlineKDE(self._cvSpace)
+        new = self.__class__(self._cvSpace)
         new._kernels = self._kernels.copy()
         new._logSumW = self._logSumW
         new._logSumWSq = self._logSumWSq
@@ -291,7 +291,9 @@ class OnlineKDE:
         self._numVarianceSamples += 1
         self._sumVariance += squaredDeviationFromMean
 
-    def update(self, position, logWeight):
+    def update(self, position, logWeight, variance=None):
         """Update the KDE by depositing a new kernel."""
-        bandwidth = np.sqrt(self._varianceScale * self.getVariance())
+        if variance is None:
+            variance = self.getVariance()
+        bandwidth = np.sqrt(self._varianceScale * variance)
         self._addKernel(position, bandwidth, logWeight, True)

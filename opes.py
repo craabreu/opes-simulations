@@ -171,18 +171,6 @@ class OPES:
         for kde in self._kde.values():
             kde.updateVariance(sqdev)
 
-    def _addKernel(self, values, energy, context):
-        """Add a kernel to the PDF estimate and update the bias potential."""
-        logWeight = energy / self._kbt
-        for case in self._cases:
-            self._kde[case].update(values, 0 if self.exploreMode else logWeight)
-            if self.exploreMode and REWEIGHTED_FES:
-                self._kde[f"{case}_reweighted"].update(values, logWeight)
-        self._force.getTabulatedFunction(0).setFunctionParameters(
-            *self._widths, self._getBias().ravel(), *self._limits
-        )
-        self._force.updateParametersInContext(context)
-
     def _syncWithDisk(self):
         """
         Save biases to disk, and check for updated files created by other processes.
@@ -269,6 +257,23 @@ class OPES:
         cvs = self._force.getCollectiveVariableValues(simulation.context)
         return cvs if self.extraBias is None else cvs[:-1]
 
+    def updateContext(self, context):
+        """Update the collective variables in the context."""
+        self._force.getTabulatedFunction(0).setFunctionParameters(
+            *self._widths, self._getBias().ravel(), *self._limits
+        )
+        self._force.updateParametersInContext(context)
+
+    def addKernel(self, values, energy, variance=None):
+        """Add a kernel to the PDF estimate and update the bias potential."""
+        logWeight = energy / self._kbt
+        for case in self._cases:
+            self._kde[case].update(
+                values, 0 if self.exploreMode else logWeight, variance
+            )
+            if self.exploreMode and REWEIGHTED_FES:
+                self._kde[f"{case}_reweighted"].update(values, logWeight, variance)
+
     def step(self, simulation, steps):
         """
         Advance the simulation by integrating a specified number of time steps.
@@ -295,7 +300,8 @@ class OPES:
                 if simulation.currentStep % self.frequency == 0:
                     state = simulation.context.getState(getEnergy=True, groups=groups)
                     energy = state.getPotentialEnergy()
-                    self._addKernel(position, energy, simulation.context)
+                    self.addKernel(position, energy)
+                    self.updateContext(simulation.context)
                     if (
                         self.saveFrequency is not None
                         and simulation.currentStep % self.saveFrequency == 0
