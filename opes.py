@@ -105,7 +105,7 @@ class OPES:
             if exploreMode and REWEIGHTED_FES:
                 self._kde[case + "_reweighted"] = OnlineKDE(self._cvSpace, varScale)
         if saveFrequency:
-            self._id = np.random.randint(0x7FFFFFFF)
+            self._id = np.random.RandomState().randint(0x7FFFFFFF)
             self._saveIndex = 0
             self._loadedBiases = {}
             self._syncWithDisk()
