@@ -26,7 +26,7 @@ def alanine_dipeptide(index: int, method: str, directory: str = ".") -> float:
     phi_atoms = [("C", "ACE"), ("N", "ALA"), ("CA", "ALA"), ("C", "ALA")]
     psi_atoms = [("N", "ALA"), ("CA", "ALA"), ("C", "ALA"), ("N", "NME")]
 
-    total_time = 40 * unit.nanoseconds
+    total_time = 100 * unit.nanoseconds
     temp = 300 * unit.kelvin
     friction = 1 / unit.picosecond
     dt = 0.004 * unit.picoseconds
@@ -70,16 +70,19 @@ def alanine_dipeptide(index: int, method: str, directory: str = ".") -> float:
     percentage = 0
     var = [(bias_width / unit.radian) ** 2] * 2
     tstep = dt / unit.nanoseconds
+    groups = 1 << 31
     with gzip.open(filename, "wt") as file:
-        file.write("time,phi,psi,varphi,varpsi\n")
-        print("proc, time, phi, psi, varphi, varpsi, percentage")
+        file.write("time,phi,psi,varphi,varpsi,bias\n")
+        print("proc, time, phi, psi, varphi, varpsi, bias, percentage")
         for cycle in range(num_cycles):
             sampler.step(simulation, pace)
             time = (cycle + 1) * pace * tstep
             angles = sampler.getCollectiveVariables(simulation)
             if method != "metad":
                 var = sampler.getVariance().tolist()
-            values = tuple(map(np.float32, [time, *angles, *var]))
+            state = context.getState(getEnergy=True, groups=groups)
+            bias = state.getPotentialEnergy() / unit.kilojoules_per_mole
+            values = tuple(map(np.float32, [time, *angles, *var, bias]))
             file.write(",".join(map(str, values)) + "\n")
             if (cycle + 1) % (num_cycles // 100) == 0:
                 percentage += 1
