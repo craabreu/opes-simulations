@@ -14,11 +14,14 @@ import simulate
 parser = argparse.ArgumentParser()
 parser.add_argument("--np", help="number of processes", type=int, default=40)
 parser.add_argument("--method", help="method to use", type=str, default="opes")
-parser.add_argument("--varfreq", help="variance frequency", type=int, default=25)
+parser.add_argument(
+    "--varfreq", help="variance frequency", type=int, default=simulate.VARIANCE_PACE
+)
 parser.add_argument("--unreweighted", help="use reweighted FES", action="store_true")
 parser.add_argument("--uncorrected", help="use fes correction", action="store_true")
 parser.add_argument("--bounded", help="unbounded kernels", action="store_true")
 parser.add_argument("--uncompressed", help="compression of grid", action="store_true")
+parser.add_argument("--singlescaled", help="use single bandwidth", action="store_true")
 args = parser.parse_args()
 
 simulate.VARIANCE_PACE = args.varfreq
@@ -26,6 +29,7 @@ opes.REWEIGHTED_FES = not args.unreweighted
 opes.CORRECTED_OPES_EXPLORE = not args.uncorrected
 online_kde.BOUNDED_KERNELS = args.bounded
 online_kde.KEEP_GRID_UNCOMPRESSED = args.uncompressed
+online_kde.USE_EXISTING_BANDWIDTHS = not args.singlescaled
 
 num_processes = args.np
 method = args.method
@@ -40,6 +44,9 @@ if args.bounded:
     directory += "_bounded"
 if args.uncompressed:
     directory += "_uncompressed"
+if args.singlescaled:
+    directory += "_singlescaled"
+
 
 program = partial(simulate.modified_wolfe_quapp, method=method, directory=directory)
 
@@ -70,6 +77,6 @@ if __name__ == "__main__":
     frame = pd.concat(dataframes)
     means = frame.groupby(["time"]).mean().reset_index()
     stdevs = frame.groupby(["time"]).std().reset_index()
-    for col in ["variance", "z", "delta_f"]:
+    for col in ["variance", "z", "n", "delta_f"]:
         means[f"stdev[{col}]"] = stdevs[col]
     means.to_csv(f"{directory}/{method}_means.csv.gz", float_format="%.6g", index=False)

@@ -60,6 +60,7 @@ class OPES:
         barrier,
         frequency,
         varianceFrequency,
+        *,
         biasFactor=None,
         exploreMode=False,
         extraBias=None,
@@ -226,6 +227,11 @@ class OPES:
                 if self.exploreMode and REWEIGHTED_FES:
                     self._kde["total_reweighted"] += bias.bias["self_reweighted"]
 
+
+    def getNumKernels(self):
+        """Get the number of kernels in the kernel density estimator."""
+        return self._kde["total"].getNumKernels()
+
     def getFreeEnergy(self):
         """
         Get the free energy of the system as a function of the collective variables.
@@ -270,6 +276,8 @@ class OPES:
 
     def addKernel(self, values, energy, variance=None):
         """Add a kernel to the PDF estimate and update the bias potential."""
+        if not isinstance(energy, unit.Quantity):
+            energy = energy * unit.kilojoules_per_mole
         logWeight = energy / self._kbt
         for case in self._cases:
             self._kde[case].update(

@@ -6,6 +6,7 @@ import numpy as np
 COMPRESSION_THRESHOLD = 1.0
 BOUNDED_KERNELS = False
 KEEP_GRID_UNCOMPRESSED = False
+USE_EXISTING_BANDWIDTHS = False
 
 
 _CV = namedtuple("_CV", ["minValue", "maxValue", "gridWidth", "periodic"])
@@ -57,7 +58,7 @@ class CVSpace:
         return len(self.variables)
 
     def displacement(self, position, endpoint):
-        """Compute the displacement between two points in the CV space."""
+        """Compute the displacement between two centers in the CV space."""
         disp = endpoint - position
         if self._periodic:
             disp[..., self._pdims] -= self._lengths * np.rint(
@@ -75,8 +76,8 @@ class CVSpace:
         return end
 
     def gridDistances(self, position):
-        """Compute the distances from a position to all points on a regular grid."""
-        distances = [points - x for points, x in zip(self._grid, position)]
+        """Compute the distances from a position to all centers on a regular grid."""
+        distances = [centers - x for centers, x in zip(self._grid, position)]
         if self._periodic:
             for dim, length in zip(self._pdims, self._lengths):
                 distances[dim] -= length * np.rint(distances[dim] / length)
@@ -101,8 +102,8 @@ class Kernel:
         d = self.cvSpace.numDimensions
         return self.logWeight - d * const - np.sum(np.log(self.bandwidth))
 
-    def _scaledDistances(self, points):
-        return self.cvSpace.displacement(self.position, points) / self.bandwidth
+    def _scaledDistances(self, centers, bandwidths):
+        return self.cvSpace.displacement(self.position, centers) / bandwidths
 
     @staticmethod
     def _exponents(x):
@@ -114,14 +115,17 @@ class Kernel:
             return values
         return -0.5 * x**2
 
-    def findNearest(self, points, ignore=()):
+    def findNearest(self, centers, bandwidths, ignore=()):
         """
-        Given a list of points in space, return the index of the nearest one and the
-        squared Mahalanobis distance to it. Optionally ignore some points.
+        Given a list of centers and their corresponding bandwidths, return the index of
+        the nearest center and the squared Mahalanobis distance to it. Optionally ignore
+        some centers.
         """
-        if points.size == 0:
+        if centers.size == 0:
             return -1, np.inf
-        sqMahalanobisDistances = np.sum(self._scaledDistances(points) ** 2, axis=-1)
+        sqMahalanobisDistances = np.sum(
+            self._scaledDistances(centers, bandwidths) ** 2, axis=-1
+        )
         if ignore:
             sqMahalanobisDistances[ignore] = np.inf
         index = np.argmin(sqMahalanobisDistances)
@@ -140,10 +144,10 @@ class Kernel:
         self.logWeight = logSumWeights
         self.logHeight = self._computeLogHeight()
 
-    def evaluate(self, points):
-        """Evaluate the logarithm of the kernel at the given point or points."""
+    def evaluate(self, centers):
+        """Evaluate the logarithm of the kernel at the given point or centers."""
         return self.logHeight + np.sum(
-            self._exponents(self._scaledDistances(points)), axis=-1
+            self._exponents(self._scaledDistances(centers, self.bandwidth)), axis=-1
         )
 
     def evaluateOnGrid(self):
@@ -230,21 +234,25 @@ class OnlineKDE:
         if self._kernels:
             if KEEP_GRID_UNCOMPRESSED:
                 self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
-            points = np.stack([k.position for k in self._kernels])
-            index, minSqDist = newKernel.findNearest(points)
+            centers = np.stack([k.position for k in self._kernels])
+            if USE_EXISTING_BANDWIDTHS:
+                bandwidths = np.stack([k.bandwidth for k in self._kernels])
+            else:
+                bandwidths = bandwidth
+            index, minSqDist = newKernel.findNearest(centers, bandwidths)
             toRemove = []
             while minSqDist <= COMPRESSION_THRESHOLD**2:
                 toRemove.append(index)
                 newKernel.merge(self._kernels[index])
-                index, minSqDist = newKernel.findNearest(points, toRemove)
-            self._logPK = np.logaddexp(self._logPK, newKernel.evaluate(points))
+                index, minSqDist = newKernel.findNearest(centers, bandwidths, toRemove)
+            self._logPK = np.logaddexp(self._logPK, newKernel.evaluate(centers))
             if not KEEP_GRID_UNCOMPRESSED:
                 self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
             if toRemove:
                 toRemove = sorted(toRemove, reverse=True)
                 for index in toRemove:
                     k = self._kernels.pop(index)
-                    self._logPK = logsubexp(self._logPK, k.evaluate(points))
+                    self._logPK = logsubexp(self._logPK, k.evaluate(centers))
                     if not KEEP_GRID_UNCOMPRESSED:
                         self._logPG = logsubexp(self._logPG, k.evaluateOnGrid())
                 self._logPK = np.delete(self._logPK, toRemove)
@@ -268,6 +276,10 @@ class OnlineKDE:
         new._numVarianceSamples = self._numVarianceSamples
         new._sumVariance = self._sumVariance
         return new
+
+    def getNumKernels(self):
+        """Get the number of kernels in the kernel density estimator."""
+        return len(self._kernels)
 
     def getVariance(self):
         """Get the variance of the sampled variables."""
