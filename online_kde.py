@@ -88,11 +88,12 @@ class CVSpace:
 class Kernel:
     """A multivariate kernel function with zero covariance."""
 
-    def __init__(self, cvSpace, position, bandwidth, logWeight):
+    def __init__(self, cvSpace, position, bandwidth, logWeight, tagFraction):
         self.cvSpace = cvSpace
         self.position = np.array(position)
         self.bandwidth = np.array(bandwidth)
         self.logWeight = logWeight
+        self.tagFraction = tagFraction
         self.logHeight = self._computeLogHeight()
 
     def _computeLogHeight(self):
@@ -114,6 +115,10 @@ class Kernel:
             values[~mask] = -np.inf
             return values
         return -0.5 * x**2
+
+    @property
+    def logTagFraction(self):
+        return np.log(self.tagFraction) if self.tagFraction > 0 else -np.inf
 
     def findNearest(self, centers, bandwidths, ignore=()):
         """
@@ -143,21 +148,28 @@ class Kernel:
         )
         self.logWeight = logSumWeights
         self.logHeight = self._computeLogHeight()
+        self.tagFraction = w2 * (other.tagFraction - self.tagFraction)
 
-    def evaluate(self, centers):
+    def evaluate(self, centers, tagged=False):
         """Evaluate the logarithm of the kernel at the given point or centers."""
-        return self.logHeight + np.sum(
+        logHeight = self.logHeight
+        if tagged:
+            logHeight += self.logTagFraction
+        return logHeight + np.sum(
             self._exponents(self._scaledDistances(centers, self.bandwidth)), axis=-1
         )
 
-    def evaluateOnGrid(self):
+    def evaluateOnGrid(self, tagged=False):
         """Evaluate the logarithms of the kernel on a regular grid."""
         distances = self.cvSpace.gridDistances(self.position)
         exponents = [
             self._exponents(dist / sigma)
             for dist, sigma in zip(distances, self.bandwidth)
         ]
-        return self.logHeight + functools.reduce(np.add.outer, reversed(exponents))
+        logHeight = self.logHeight
+        if tagged:
+            logHeight += self.logTagFraction
+        return logHeight + functools.reduce(np.add.outer, reversed(exponents))
 
 
 class OnlineKDE:
@@ -182,6 +194,7 @@ class OnlineKDE:
                 np.stack([k.position for k in self._kernels]),
                 np.stack([k.bandwidth for k in self._kernels]),
                 np.array([k.logWeight for k in self._kernels]),
+                np.array([k.tagFraction for k in self._kernels]),
             ]
         else:
             kernelData = []
@@ -218,10 +231,10 @@ class OnlineKDE:
         self._numVarianceSamples += other._numVarianceSamples
         self._sumVariance += other._sumVariance.copy()
         for k in other._kernels:
-            self._addKernel(k.position, k.bandwidth, k.logWeight, False)
+            self._addKernel(k.position, k.bandwidth, k.logWeight, k.tagFraction, False)
         return self
 
-    def _addKernel(self, position, bandwidth, logWeight, adjustBandwidth):
+    def _addKernel(self, position, bandwidth, logWeight, tagFraction, adjustBandwidth):
         """Update the KDE by depositing a new kernel."""
         self._numSamples += 1
         self._logSumW = np.logaddexp(self._logSumW, logWeight)
@@ -230,7 +243,7 @@ class OnlineKDE:
             neff = np.exp(2 * self._logSumW - self._logSumWSq)
             silverman = (neff * (self._d + 2) / 4) ** (-1 / (self._d + 4))
             bandwidth = bandwidth * silverman
-        newKernel = Kernel(self._cvSpace, position, bandwidth, logWeight)
+        newKernel = Kernel(self._cvSpace, position, bandwidth, logWeight, tagFraction)
         if self._kernels:
             if KEEP_GRID_UNCOMPRESSED:
                 self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
@@ -303,8 +316,8 @@ class OnlineKDE:
         self._numVarianceSamples += 1
         self._sumVariance += squaredDeviationFromMean
 
-    def update(self, position, logWeight, variance=None):
+    def update(self, position, logWeight, variance=None, tagged=False):
         """Update the KDE by depositing a new kernel."""
         variance = self.getVariance() if variance is None else np.asarray(variance)
         bandwidth = np.sqrt(self._varianceScale * variance)
-        self._addKernel(position, bandwidth, logWeight, True)
+        self._addKernel(position, bandwidth, logWeight, int(tagged), True)
