@@ -316,7 +316,7 @@ class OnlineKDE:
         self._numVarianceSamples += 1
         self._sumVariance += squaredDeviationFromMean
 
-    def update(self, position, logWeight, variance=None, tagged=False):
+    def update(self, position, logWeight, variance=None, tagged=True):
         """Update the KDE by depositing a new kernel."""
         variance = self.getVariance() if variance is None else np.asarray(variance)
         bandwidth = np.sqrt(self._varianceScale * variance)

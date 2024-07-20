@@ -64,6 +64,7 @@ class OPES:
         biasFactor=None,
         exploreMode=False,
         extraBias=None,
+        basinSensors=None,
         saveFrequency=None,
         biasDir=None,
     ):
@@ -78,6 +79,7 @@ class OPES:
         self.varianceFrequency = varianceFrequency
         self.biasFactor = biasFactor
         self.exploreMode = exploreMode
+        self.basinSensors = basinSensors
         self.extraBias = extraBias
         self.saveFrequency = saveFrequency
         self.biasDir = biasDir
@@ -96,6 +98,7 @@ class OPES:
         self._biasFactor = biasFactor
         self._prefactor = prefactor / unit.kilojoules_per_mole
         self._logEpsilon = -barrier / prefactor
+        self._tagged = True
 
         self._kde = {}
         varScale = 1.0 / biasFactor
@@ -159,6 +162,8 @@ class OPES:
             raise ValueError("OPES requires 1, 2, or 3 collective variables")
         if not freeGroups:
             raise RuntimeError("OPES requires a free force group, but all are in use.")
+        if self.basinSensors is not None and len(self.basinSensors) != 2:
+            raise ValueError("basinSensors must be either a pair of functions or None")
 
     def _getBias(self):
         kde = self._kde["total"]
@@ -175,6 +180,11 @@ class OPES:
         sqdev = delta * self._cvSpace.displacement(self._sampleMean, values)
         for kde in self._kde.values():
             kde.updateVariance(sqdev)
+        if self.basinSensors is not None:
+            if self._tagged:
+                self._tagged = not self.basinSensors[1](*values)
+            else:
+                self._tagged = self.basingIndicators[0](*values)
 
     def _syncWithDisk(self):
         """
@@ -226,7 +236,6 @@ class OPES:
                 self._kde["total"] += bias.bias["self"]
                 if self.exploreMode and REWEIGHTED_FES:
                     self._kde["total_reweighted"] += bias.bias["self_reweighted"]
-
 
     def getNumKernels(self):
         """Get the number of kernels in the kernel density estimator."""
@@ -281,10 +290,12 @@ class OPES:
         logWeight = energy / self._kbt
         for case in self._cases:
             self._kde[case].update(
-                values, 0 if self.exploreMode else logWeight, variance
+                values, 0 if self.exploreMode else logWeight, variance, self._tagged
             )
             if self.exploreMode and REWEIGHTED_FES:
-                self._kde[f"{case}_reweighted"].update(values, logWeight, variance)
+                self._kde[f"{case}_reweighted"].update(
+                    values, logWeight, variance, self._tagged
+                )
 
     def step(self, simulation, steps):
         """
