@@ -42,7 +42,7 @@ def muller_brown(index: int, method: str, directory: str = ".") -> float:
 
     grid_min = -2
     grid_max = 2
-    grid_bin = 401
+    grid_bin = 201
 
     wall_kappa = 1000
     xmin = -1.3
@@ -99,24 +99,27 @@ def muller_brown(index: int, method: str, directory: str = ".") -> float:
     os.makedirs(directory, exist_ok=True)
     filename = f"{directory}/{method}_{index:02d}.csv.gz"
     percentage = 0
-    n = grid_bin // 2
-    z = 0
+    half = grid_bin // 2
+    z = n = 0
     var = sigma**2
     with gzip.open(filename, "wt") as file:
-        file.write("time,x,y,variance,z,delta_f\n")
-        print("proc, time, x, y, variance, z, delta_f, percentage")
+        file.write("time,x,y,variance,z,n,delta_f\n")
+        print("proc, time, x, y, variance, z, n, delta_f, percentage")
         for cycle in range(num_cycles):
             sampler.step(simulation, pace)
             time = (cycle + 1) * pace * tstep
             state = context.getState(getPositions=True)
             positions = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
             x, y, _ = positions.flatten()
-            fes = sampler.getFreeEnergy() / unit.kilojoules_per_mole
-            delta_f = np.logaddexp.reduce(-fes[:n]) - np.logaddexp.reduce(-fes[n:])
+            fe = sampler.getFreeEnergy() / unit.kilojoules_per_mole
+            delta_f = np.logaddexp.reduce(-fe[:half]) - np.logaddexp.reduce(-fe[half:])
             if method != "metad":
                 z = sampler.getAverageDensity()
+                n = sampler.getNumKernels()
                 var = sampler.getVariance().item()
-            values = tuple(map(np.float32, [time, x, y, var, z, delta_f]))
+            values = tuple(
+                map(np.float32, [time, x, y, var, z, n, delta_f])
+            )
             file.write(",".join(map(str, values)) + "\n")
             if (cycle + 1) % (num_cycles // 100) == 0:
                 percentage += 1
