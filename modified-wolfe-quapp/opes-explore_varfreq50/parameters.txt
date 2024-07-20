@@ -4,4 +4,4 @@ opes.REWEIGHTED_FES=True
 opes.CORRECTED_OPES_EXPLORE=True
 online_kde.BOUNDED_KERNELS=False
 online_kde.KEEP_GRID_UNCOMPRESSED=False
-execution_times=234.655 +/- 15.909 s
+execution_times=231.691 +/- 7.116 s

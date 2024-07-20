@@ -21,7 +21,7 @@ parser.add_argument("--unreweighted", help="use reweighted FES", action="store_t
 parser.add_argument("--uncorrected", help="use fes correction", action="store_true")
 parser.add_argument("--bounded", help="unbounded kernels", action="store_true")
 parser.add_argument("--uncompressed", help="compression of grid", action="store_true")
-parser.add_argument("--singlescaled", help="use single bandwidth", action="store_true")
+parser.add_argument("--incomingbw", help="use incoming bandwidth", action="store_true")
 args = parser.parse_args()
 
 simulate.VARIANCE_PACE = args.varfreq
@@ -29,7 +29,7 @@ opes.REWEIGHTED_FES = not args.unreweighted
 opes.CORRECTED_OPES_EXPLORE = not args.uncorrected
 online_kde.BOUNDED_KERNELS = args.bounded
 online_kde.KEEP_GRID_UNCOMPRESSED = args.uncompressed
-online_kde.USE_EXISTING_BANDWIDTHS = not args.singlescaled
+online_kde.USE_EXISTING_BANDWIDTHS = not args.incomingbw
 
 num_processes = args.np
 method = args.method
@@ -44,9 +44,8 @@ if args.bounded:
     directory += "_bounded"
 if args.uncompressed:
     directory += "_uncompressed"
-if args.singlescaled:
-    directory += "_singlescaled"
-
+if args.incomingbw:
+    directory += "_incomingbw"
 
 program = partial(simulate.modified_wolfe_quapp, method=method, directory=directory)
 
