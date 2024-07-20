@@ -184,7 +184,7 @@ class OPES:
             if self._tagged:
                 self._tagged = not self.basinSensors[1](*values)
             else:
-                self._tagged = self.basingIndicators[0](*values)
+                self._tagged = self.basinSensors[0](*values)
 
     def _syncWithDisk(self):
         """
