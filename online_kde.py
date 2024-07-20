@@ -6,10 +6,7 @@ import numpy as np
 COMPRESSION_THRESHOLD = 1.0
 BOUNDED_KERNELS = False
 KEEP_GRID_UNCOMPRESSED = False
-USE_EXISTING_BANDWIDTHS = False
-
-
-_CV = namedtuple("_CV", ["minValue", "maxValue", "gridWidth", "periodic"])
+USE_EXISTING_BANDWIDTHS = True
 
 
 def logsubexp(x, y):
@@ -29,7 +26,8 @@ class CVSpace:
 
     def __init__(self, variables):
         self.variables = [
-            _CV(cv.minValue, cv.maxValue, cv.gridWidth, cv.periodic) for cv in variables
+            self._CV(cv.minValue, cv.maxValue, cv.gridWidth, cv.periodic)
+            for cv in variables
         ]
         self._periodic = any(cv.periodic for cv in variables)
         self._grid = [
@@ -41,11 +39,13 @@ class CVSpace:
             ubounds = np.array([variables[i].maxValue for i in self._pdims])
             self._lengths = ubounds - self._lbounds
 
+    _CV = namedtuple("_CV", ["minValue", "maxValue", "gridWidth", "periodic"])
+
     def __getstate__(self):
         return {"variables": [cv._asdict() for cv in self.variables]}
 
     def __setstate__(self, state):
-        self.__init__([_CV(**kwargs) for kwargs in state["variables"]])
+        self.__init__([self._CV(**kwargs) for kwargs in state["variables"]])
 
     @property
     def gridShape(self):
