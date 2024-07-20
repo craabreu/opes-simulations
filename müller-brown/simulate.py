@@ -75,7 +75,7 @@ def muller_brown(index: int, method: str, directory: str = ".") -> float:
             bias_factor,
             pace,
             variance_pace,
-            explore,
+            exploreMode=explore,
         )
     elif method == "metad":
         sampler = app.Metadynamics(
