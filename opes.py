@@ -313,17 +313,6 @@ class OPES:
                         self._syncWithDisk()
             stepsToGo -= nextSteps
 
-    def setVariance(self, variance):
-        """
-        Set the variance of the probability distribution estimate.
-
-        Parameters
-        ----------
-        variance
-            The variance of the probability distribution estimate.
-        """
-        self._sampleVariance = variance
-
     def getVariance(self):
         """Get the variance of the probability distribution estimate."""
         return self._kde["total"].getVariance()
