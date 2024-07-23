@@ -17,9 +17,7 @@ class LangevinIntegrator(mm.CustomIntegrator):
         super().__init__(tstep)
         lscale = np.exp(-0.5 * tstep * friction)
         self.addGlobalVariable("lscale", lscale)
-        self.addGlobalVariable(
-            "lrand", np.sqrt((1.0 - lscale * lscale) * KB * temperature)
-        )
+        self.addGlobalVariable("lrand", np.sqrt((1.0 - lscale**2) * KB * temperature))
         self.addComputePerDof("v", "lscale*v + lrand*gaussian + 0.5*dt*f/m")
         self.addComputePerDof("x", "x + dt*v")
         self.addComputePerDof("v", "lscale*(v + 0.5*dt*f/m) + lrand*gaussian")

@@ -19,10 +19,12 @@ parser.add_argument("--uncorrected", help="use fes correction", action="store_tr
 parser.add_argument("--bounded", help="unbounded kernels", action="store_true")
 parser.add_argument("--uncompressed", help="compression of grid", action="store_true")
 parser.add_argument("--incomingbw", help="use incoming bandwidth", action="store_true")
+parser.add_argument("--frombias", help="use bias instead of PDF", action="store_true")
 args = parser.parse_args()
 
 opes.REWEIGHTED_FES = not args.unreweighted
 opes.CORRECTED_OPES_EXPLORE = not args.uncorrected
+opes.USE_BIAS_INSTEAD_OF_PDF = args.frombias
 online_kde.BOUNDED_KERNELS = args.bounded
 online_kde.KEEP_GRID_UNCOMPRESSED = args.uncompressed
 online_kde.USE_EXISTING_BANDWIDTHS = not args.incomingbw
@@ -31,12 +33,12 @@ num_processes = args.np
 method = args.method
 directory = method
 
-directory += "_test"
-
 if args.unreweighted:
     directory += "_unreweighted"
 if args.uncorrected:
     directory += "_uncorrected"
+if args.frombias:
+    directory += "_frombias"
 if args.bounded:
     directory += "_bounded"
 if args.uncompressed:
@@ -56,6 +58,7 @@ if __name__ == "__main__":
             f"simulate.VARIANCE_PACE={simulate.VARIANCE_PACE}\n"
             f"opes.REWEIGHTED_FES={opes.REWEIGHTED_FES}\n"
             f"opes.CORRECTED_OPES_EXPLORE={opes.CORRECTED_OPES_EXPLORE}\n"
+            f"opes.USE_BIAS_INSTEAD_OF_PDF={opes.USE_BIAS_INSTEAD_OF_PDF}\n"
             f"online_kde.BOUNDED_KERNELS={online_kde.BOUNDED_KERNELS}\n"
             f"online_kde.KEEP_GRID_UNCOMPRESSED={online_kde.KEEP_GRID_UNCOMPRESSED}\n"
             f"online_kde.USE_EXISTING_BANDWIDTHS={online_kde.USE_EXISTING_BANDWIDTHS}\n"

@@ -12,6 +12,7 @@ from online_kde import CVSpace, OnlineKDE
 
 STATS_WINDOW_SIZE = 10
 CORRECTED_OPES_EXPLORE = True
+USE_BIAS_INSTEAD_OF_PDF = False
 REWEIGHTED_FES = True
 
 
@@ -58,7 +59,6 @@ class OPES:
         barrier,
         frequency,
         varianceFrequency,
-        *,
         biasFactor=None,
         exploreMode=False,
         saveFrequency=None,
@@ -238,6 +238,8 @@ class OPES:
         if not self.exploreMode:
             return freeEnergy
         if not CORRECTED_OPES_EXPLORE:
+            if USE_BIAS_INSTEAD_OF_PDF:
+                return -self._kbt * self.getBias() * self._biasFactor / self._prefactor
             return freeEnergy * self._biasFactor
         return freeEnergy - self.getBias()
 
