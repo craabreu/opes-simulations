@@ -308,3 +308,7 @@ class OnlineKDE:
         variance = self.getVariance() if variance is None else np.asarray(variance)
         bandwidth = np.sqrt(self._varianceScale * variance)
         self._addKernel(position, bandwidth, logWeight, True)
+
+    def evaluate(self, centers):
+        """Evaluate the logarithm of the kernel at the given point or centers."""
+        return np.logaddexp.reduce([k.evaluate(centers) for k in self._kernels])

@@ -48,8 +48,6 @@ class OPES:
         The bias factor to use. If None, then barrier / kT is used.
     exploreMode
         Whether to apply the OPES-Explore variant.
-    extraBias
-        An OpenMM Force to be added to the bias potential.
     """
 
     def __init__(
@@ -63,7 +61,6 @@ class OPES:
         *,
         biasFactor=None,
         exploreMode=False,
-        extraBias=None,
         saveFrequency=None,
         biasDir=None,
     ):
@@ -78,7 +75,6 @@ class OPES:
         self.varianceFrequency = varianceFrequency
         self.biasFactor = biasFactor
         self.exploreMode = exploreMode
-        self.extraBias = extraBias
         self.saveFrequency = saveFrequency
         self.biasDir = biasDir
 
@@ -94,7 +90,7 @@ class OPES:
             prefactor *= biasFactor
         self._kbt = kbt.in_units_of(unit.kilojoules_per_mole)
         self._biasFactor = biasFactor
-        self._prefactor = prefactor / unit.kilojoules_per_mole
+        self._prefactor = prefactor
         self._logEpsilon = -barrier / prefactor
 
         self._kde = {}
@@ -127,13 +123,9 @@ class OPES:
         self._limits = sum(([cv.minValue, cv.maxValue] for cv in variables), [])
 
         energyFunction = "table(" + ",".join(f"cv{i}" for i in range(d)) + ")"
-        if extraBias is not None:
-            energyFunction += "+extraBias"
         self._force = mm.CustomCVForce(energyFunction)
         for i, var in enumerate(variables):
             self._force.addCollectiveVariable(f"cv{i}", var.force)
-        if extraBias is not None:
-            self._force.addCollectiveVariable("extraBias", extraBias)
         table = getattr(mm, f"Continuous{d}DFunction")(
             *self._widths,
             np.full(np.prod(gridWidths), -barrier / unit.kilojoules_per_mole),
@@ -159,12 +151,6 @@ class OPES:
             raise ValueError("OPES requires 1, 2, or 3 collective variables")
         if not freeGroups:
             raise RuntimeError("OPES requires a free force group, but all are in use.")
-
-    def _getBias(self):
-        kde = self._kde["total"]
-        return self._prefactor * np.logaddexp(
-            kde.getLogPDF() - kde.getLogMeanDensity(), self._logEpsilon
-        )
 
     def _updateSampleStats(self, values):
         """Update the sample mean and variance of the collective variables."""
@@ -227,10 +213,16 @@ class OPES:
                 if self.exploreMode and REWEIGHTED_FES:
                     self._kde["total_reweighted"] += bias.bias["self_reweighted"]
 
-
     def getNumKernels(self):
         """Get the number of kernels in the kernel density estimator."""
         return self._kde["total"].getNumKernels()
+
+    def getBias(self):
+        """Get the OPES bias potential evaluated on the grid."""
+        kde = self._kde["total"]
+        return self._prefactor * np.logaddexp(
+            kde.getLogPDF() - kde.getLogMeanDensity(), self._logEpsilon
+        )
 
     def getFreeEnergy(self):
         """
@@ -247,7 +239,7 @@ class OPES:
             return freeEnergy
         if not CORRECTED_OPES_EXPLORE:
             return freeEnergy * self._biasFactor
-        return freeEnergy - self._getBias() * unit.kilojoules_per_mole
+        return freeEnergy - self.getBias()
 
     def getAverageDensity(self):
         """
@@ -264,13 +256,13 @@ class OPES:
         simulation
             The Simulation to query.
         """
-        cvs = self._force.getCollectiveVariableValues(simulation.context)
-        return cvs if self.extraBias is None else cvs[:-1]
+        return self._force.getCollectiveVariableValues(simulation.context)
 
     def updateContext(self, context):
         """Update the collective variables in the context."""
+        bias = self.getBias().value_in_unit(unit.kilojoules_per_mole)
         self._force.getTabulatedFunction(0).setFunctionParameters(
-            *self._widths, self._getBias().ravel(), *self._limits
+            *self._widths, bias.ravel(), *self._limits
         )
         self._force.updateParametersInContext(context)
 

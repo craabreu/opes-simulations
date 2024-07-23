@@ -30,6 +30,9 @@ online_kde.USE_EXISTING_BANDWIDTHS = not args.incomingbw
 num_processes = args.np
 method = args.method
 directory = method
+
+directory += "_test"
+
 if args.unreweighted:
     directory += "_unreweighted"
 if args.uncorrected:

@@ -9,6 +9,20 @@ from openmm import app, unit
 from opes import OPES
 
 VARIANCE_PACE: int = 50
+KB: float = unit.MOLAR_GAS_CONSTANT_R.value_in_unit_system(unit.md_unit_system)
+
+
+class LangevinIntegrator(mm.CustomIntegrator):
+    def __init__(self, temperature, friction, tstep):
+        super().__init__(tstep)
+        lscale = np.exp(-0.5 * tstep * friction)
+        self.addGlobalVariable("lscale", lscale)
+        self.addGlobalVariable(
+            "lrand", np.sqrt((1.0 - lscale * lscale) * KB * temperature)
+        )
+        self.addComputePerDof("v", "lscale*v + lrand*gaussian + 0.5*dt*f/m")
+        self.addComputePerDof("x", "x + dt*v")
+        self.addComputePerDof("v", "lscale*(v + 0.5*dt*f/m) + lrand*gaussian")
 
 
 def muller_brown(index: int, method: str, directory: str = ".") -> float:
@@ -26,13 +40,21 @@ def muller_brown(index: int, method: str, directory: str = ".") -> float:
         ")"
     )
 
+    wall_kappa = 1000
+    xmin = -1.3
+    xmax = 1.0
+    wall_potential_str = (
+        f"{wall_kappa}*((step(dmin)*dmin)^2+(step(dmax)*dmax)^2)"
+        f";dmin={xmin}-x"
+        f";dmax=x-{xmax}"
+    )
+
     nstep = 200000000
     mass = 1.0
     tstep = 0.005
-    kb = unit.MOLAR_GAS_CONSTANT_R.value_in_unit_system(unit.md_unit_system)
-    temperature = 1.0 / kb
+    temperature = 1.0 / KB
     friction = 10.0
-    reference_position = (-0.57537868, 1.4223848)
+    reference_position = (-0.5582, 1.442)
 
     height = 1
     pace = 500
@@ -43,15 +65,6 @@ def muller_brown(index: int, method: str, directory: str = ".") -> float:
     grid_min = -2
     grid_max = 2
     grid_bin = 201
-
-    wall_kappa = 1000
-    xmin = -1.3
-    xmax = 1
-    wall_potential_str = (
-        f"{wall_kappa}*((step(dmin)*dmin)^2+(step(dmax)*dmax)^2)"
-        f";dmin={xmin}-x"
-        f";dmax=x-{xmax}"
-    )
 
     system = mm.System()
     system.addParticle(mass)
@@ -88,7 +101,7 @@ def muller_brown(index: int, method: str, directory: str = ".") -> float:
     topology.addAtom("ATOM", None, topology.addResidue("MOL", topology.addChain()))
 
     platform = mm.Platform.getPlatformByName("Reference")
-    integrator = mm.LangevinMiddleIntegrator(temperature, friction, tstep)
+    integrator = LangevinIntegrator(temperature, friction, tstep)
     simulation = app.Simulation(topology, system, integrator, platform)
     context = simulation.context
     initial_position = np.random.normal(reference_position, sigma, 2)
@@ -117,9 +130,7 @@ def muller_brown(index: int, method: str, directory: str = ".") -> float:
                 z = sampler.getAverageDensity()
                 n = sampler.getNumKernels()
                 var = sampler.getVariance().item()
-            values = tuple(
-                map(np.float32, [time, x, y, var, z, n, delta_f])
-            )
+            values = tuple(map(np.float32, [time, x, y, var, z, n, delta_f]))
             file.write(",".join(map(str, values)) + "\n")
             if (cycle + 1) % (num_cycles // 100) == 0:
                 percentage += 1

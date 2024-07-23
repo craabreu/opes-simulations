@@ -7,6 +7,8 @@ python run.py --method opes-explore --uncompressed
 python run.py --method opes-explore --unreweighted --uncorrected
 python run.py --method opes-explore --bounded
 python run.py --method opes-explore --bounded --unreweighted
+python run.py --method opes-explore --unreweighted --uncompressed
+python run.py --method opes-explore --unreweighted --uncorrected --uncompressed
 python run.py --method opes-explore --bounded --unreweighted --uncorrected
 python run.py --method opes-explore --incomingbw
 python run.py --method metad
