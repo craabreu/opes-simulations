@@ -163,7 +163,7 @@ class Kernel:
 class OnlineKDE:
     """Online Kernel Density Estimation (KDE) for collective variable sampling."""
 
-    def __init__(self, cvSpace, varianceScale=1.0):
+    def __init__(self, cvSpace, varianceScale=1.0, reweighting=False):
         self._kernels = []
         self._cvSpace = cvSpace
         self._numSamples = 0
@@ -173,6 +173,7 @@ class OnlineKDE:
         self._logPG = np.full(cvSpace.gridShape, -np.inf)
         self._d = len(cvSpace.gridShape)
         self._varianceScale = varianceScale
+        self._reweighting = reweighting
 
     def __getstate__(self):
         if self._kernels:
@@ -191,6 +192,7 @@ class OnlineKDE:
             "logPK": self._logPK,
             "logPG": self._logPG,
             "varianceScale": self._varianceScale,
+            "reweighting": self._reweighting,
             "kernelData": kernelData,
         }
 
@@ -202,16 +204,22 @@ class OnlineKDE:
         self._logPK = state["logPK"]
         self._logPG = state["logPG"]
         self._varianceScale = state["varianceScale"]
+        self._reweighting = state["reweighting"]
         self._kernels = [
             Kernel(self._cvSpace, *data) for data in zip(*state["kernelData"])
         ]
 
     def __iadd__(self, other):
+        if other._reweighting != self._reweighting:
+            raise ValueError("Cannot add KDEs with incompatible reweighting flags")
         if not np.isclose(other._varianceScale, self._varianceScale):
             raise ValueError("Cannot add KDEs with incompatible variance scales")
         for k in other._kernels:
             self._addKernel(k.position, k.bandwidth, k.logWeight, False)
         return self
+
+    def _logDenominator(self):
+        return self._logSumW if self._reweighting else np.log(self._numSamples)
 
     def _addKernel(self, position, bandwidth, logWeight, adjustBandwidth):
         """Update the KDE by depositing a new kernel."""
@@ -222,7 +230,9 @@ class OnlineKDE:
             neff = np.exp(2 * self._logSumW - self._logSumWSq)
             silverman = (neff * (self._d + 2) / 4) ** (-1 / (self._d + 4))
             bandwidth = bandwidth * silverman
-        newKernel = Kernel(self._cvSpace, position, bandwidth, logWeight)
+        newKernel = Kernel(
+            self._cvSpace, position, bandwidth, logWeight if self._reweighting else 0.0
+        )
         if self._kernels:
             if KEEP_GRID_UNCOMPRESSED:
                 self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
@@ -265,6 +275,7 @@ class OnlineKDE:
         new._logPK = self._logPK.copy()
         new._logPG = self._logPG.copy()
         new._varianceScale = self._varianceScale
+        new._reweighting = self._reweighting
         return new
 
     def getNumKernels(self):
@@ -273,12 +284,12 @@ class OnlineKDE:
 
     def getLogPDF(self):
         """Get the logarithm of the probability density function (PDF) on the grid."""
-        return self._logPG - self._logSumW
+        return self._logPG - self._logDenominator()
 
     def getLogMeanDensity(self):
         """Get the logarithm of the mean density."""
         n = len(self._kernels)
-        return np.logaddexp.reduce(self._logPK) - np.log(n) - self._logSumW
+        return np.logaddexp.reduce(self._logPK) - np.log(n) - self._logDenominator()
 
     def getLogNormalizingConstantRatio(self):
         """Get the logarithm of the ratio of the normalizing constants."""
