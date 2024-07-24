@@ -288,7 +288,7 @@ class OPES:
             if not USE_PDF_OPES_EXPLORE:
                 return -self._kbt * self.getBias() * self._biasFactor / self._prefactor
             return freeEnergy * self._biasFactor
-        return freeEnergy - self.getBias()
+        return freeEnergy - self.getBias() + self._kde["total"].getLogNormConstRatio()
 
     def getAverageDensity(self):
         """

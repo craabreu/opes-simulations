@@ -291,9 +291,9 @@ class OnlineKDE:
         n = len(self._kernels)
         return np.logaddexp.reduce(self._logPK) - np.log(n) - self._logDenominator()
 
-    def getLogNormalizingConstantRatio(self):
+    def getLogNormConstRatio(self):
         """Get the logarithm of the ratio of the normalizing constants."""
-        return self._logSumW - np.log(self._counter)
+        return self._logSumW - np.log(self._numSamples)
 
     def update(self, position, logWeight, variance):
         """Update the KDE by depositing a new kernel."""
