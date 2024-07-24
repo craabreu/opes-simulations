@@ -1,7 +1,5 @@
 method=opes-explore
 simulate.VARIANCE_PACE=50
-opes.REWEIGHTED_FES=True
-opes.CORRECTED_OPES_EXPLORE=True
 online_kde.BOUNDED_KERNELS=True
 online_kde.KEEP_GRID_UNCOMPRESSED=False
-execution_times=294.213 +/- 8.503 s
+execution_times=320.611 +/- 6.700 s
