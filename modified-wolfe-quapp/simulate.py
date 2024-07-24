@@ -4,11 +4,17 @@ from timeit import default_timer as timer
 import gzip
 import numpy as np
 import openmm as mm
+import pandas as pd
 from openmm import app, unit
 
-from opes import OPES
+import opes
 
 VARIANCE_PACE: int = 50
+
+
+def compute_delta_f(sampler, half):
+    fes = sampler.getFreeEnergy() / unit.kilojoules_per_mole
+    return np.logaddexp.reduce(-fes[:half]) - np.logaddexp.reduce(-fes[half:])
 
 
 def modified_wolfe_quapp(index: int, method: str, directory: str = ".") -> float:
@@ -63,7 +69,7 @@ def modified_wolfe_quapp(index: int, method: str, directory: str = ".") -> float
 
     explore = method == "opes-explore"
     if method.startswith("opes"):
-        sampler = OPES(
+        sampler = opes.OPES(
             system,
             [bias_variable],
             temperature,
@@ -98,34 +104,55 @@ def modified_wolfe_quapp(index: int, method: str, directory: str = ".") -> float
     z = n = 0
     var = sigma**2
     with gzip.open(filename, "wt") as file:
-        file.write("time,x,y,variance,z,n,delta_f\n")
-        print("proc, time, x, y, variance, z, n, delta_f, percentage")
+        titles = ["delta_f"]
+        if method == "opes-explore":
+            titles += [
+                "delta_f_unreweighted",
+                "delta_f_uncorrected",
+                "delta_f_from_bias",
+            ]
+        file.write(f"time,x,y,variance,z,n,{','.join(titles)}\n")
+        print(f"proc, time, x, y, variance, z, n, {', '.join(titles)}, percentage")
         for cycle in range(num_cycles):
             sampler.step(simulation, pace)
             time = (cycle + 1) * pace * tstep
             state = context.getState(getPositions=True)
             positions = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
             x, y, _ = positions.flatten()
-            fe = sampler.getFreeEnergy() / unit.kilojoules_per_mole
-            delta_f = np.logaddexp.reduce(-fe[:half]) - np.logaddexp.reduce(-fe[half:])
+            delta_f = [compute_delta_f(sampler, half)]
+            if method == "opes-explore":
+                opes.REWEIGHTED_FES = False
+                delta_f += [compute_delta_f(sampler, half)]
+                opes.CORRECTED_OPES_EXPLORE = False
+                delta_f += [compute_delta_f(sampler, half)]
+                opes.USE_PDF_OPES_EXPLORE = False
+                delta_f += [compute_delta_f(sampler, half)]
+                opes.REWEIGHTED_FES = True
+                opes.CORRECTED_OPES_EXPLORE = True
+                opes.USE_PDF_OPES_EXPLORE = True
             if method != "metad":
                 z = sampler.getAverageDensity()
                 n = sampler.getNumKernels()
                 var = sampler.getVariance().item()
-            values = tuple(
-                map(np.float32, [time, x, y, var, z, n, delta_f])
-            )
+            values = tuple(map(np.float32, [time, x, y, var, z, n, *delta_f]))
             file.write(",".join(map(str, values)) + "\n")
             if (cycle + 1) % (num_cycles // 100) == 0:
                 percentage += 1
                 print(index, *values, f"{percentage}%")
 
-    filename = f"{directory}/profile_{method}_{index:02d}.csv"
+    df = pd.DataFrame({"x": np.linspace(grid_min, grid_max, grid_bin)})
     fes = sampler.getFreeEnergy() / unit.kilojoules_per_mole
-    fes -= fes.min()
-    with open(filename, "w", encoding="utf-8") as file:
-        file.write("x,fes\n")
-        for x, f in zip(np.linspace(grid_min, grid_max, grid_bin), fes):
-            file.write(",".join(map(str, [x, f])) + "\n")
+    df["fes"] = fes - fes.min()
+    if method == "opes-explore":
+        opes.REWEIGHTED_FES = False
+        fes = sampler.getFreeEnergy() / unit.kilojoules_per_mole
+        df["fes_unreweighted"] = fes - fes.min()
+        opes.CORRECTED_OPES_EXPLORE = False
+        fes = sampler.getFreeEnergy() / unit.kilojoules_per_mole
+        df["fes_uncorrected"] = fes - fes.min()
+        opes.USE_PDF_OPES_EXPLORE = False
+        fes = sampler.getFreeEnergy() / unit.kilojoules_per_mole
+        df["fes_from_bias"] = fes - fes.min()
+    df.to_csv(f"{directory}/profile_{method}_{index:02d}.csv", index=False)
 
     return timer() - start
