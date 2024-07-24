@@ -16,6 +16,46 @@ USE_PDF_OPES_EXPLORE = True
 REWEIGHTED_FES = True
 
 
+class RunningVariance:
+    """Class to handle variance calculations for sampled variables."""
+
+    def __init__(self, numDimensions):
+        self._numVarianceSamples = 0
+        self._sumVariance = np.zeros(numDimensions)
+
+    def __getstate__(self):
+        return {
+            "numVarianceSamples": self._numVarianceSamples,
+            "sumVariance": self._sumVariance,
+        }
+
+    def __setstate__(self, state):
+        self._numVarianceSamples = state["numVarianceSamples"]
+        self._sumVariance = state["sumVariance"]
+
+    def __iadd__(self, other):
+        self._sumVariance += other._sumVariance
+        self._numVarianceSamples += other._numVarianceSamples
+        return self
+
+    def copy(self):
+        new = self.__class__(self._sumVariance.shape[0])
+        new._numVarianceSamples = self._numVarianceSamples
+        new._sumVariance = self._sumVariance
+        return new
+
+    def update(self, squaredDeviationFromMean):
+        """Update the variance with a new squared deviation from the mean."""
+        self._numVarianceSamples += 1
+        self._sumVariance += squaredDeviationFromMean
+
+    def get(self):
+        """Get the variance of the sampled variables."""
+        if self._numVarianceSamples == 0:
+            return np.zeros_like(self._sumVariance)
+        return self._sumVariance / self._numVarianceSamples
+
+
 class OPES:
     """Performs On-the-fly Probability Enhanced Sampling (OPES).
 
@@ -101,22 +141,24 @@ class OPES:
             self._kde[case] = OnlineKDE(self._cvSpace, 1.0 if exploreMode else varScale)
             if exploreMode and REWEIGHTED_FES:
                 self._kde[case + "_reweighted"] = OnlineKDE(self._cvSpace, varScale)
-        if saveFrequency:
-            self._id = np.random.RandomState().randint(0x7FFFFFFF)
-            self._saveIndex = 0
-            self._loadedBiases = {}
-            self._syncWithDisk()
 
         self._adaptiveVariance = varianceFrequency is not None
         self._interval = varianceFrequency or frequency
+        self._runningVariance = {case: RunningVariance(d) for case in self._cases}
         if self._adaptiveVariance:
             self._tau = STATS_WINDOW_SIZE * frequency // varianceFrequency
             self._counter = 0
             self._sampleMean = np.zeros(d)
         else:
             sqdev = np.array([cv.biasWidth**2 for cv in variables])
-            for kde in self._kde.values():
-                kde.updateVariance(sqdev)
+            for case in self._cases:
+                self._runningVariance[case].update(sqdev)
+
+        if saveFrequency:
+            self._id = np.random.RandomState().randint(0x7FFFFFFF)
+            self._saveIndex = 0
+            self._loadedBiases = {}
+            self._syncWithDisk()
 
         gridWidths = [cv.gridWidth for cv in variables]
         self._widths = [] if d == 1 else gridWidths
@@ -159,8 +201,8 @@ class OPES:
         x = 1 / min(self._tau, self._counter)
         self._sampleMean = self._cvSpace.endpoint(self._sampleMean, x * delta)
         sqdev = delta * self._cvSpace.displacement(self._sampleMean, values)
-        for kde in self._kde.values():
-            kde.updateVariance(sqdev)
+        for case in self._cases:
+            self._runningVariance[case].update(sqdev)
 
     def _syncWithDisk(self):
         """
@@ -171,9 +213,9 @@ class OPES:
         self._saveIndex += 1
         tempName = os.path.join(self.biasDir, f"temp_{self._id}_{self._saveIndex}.pkl")
         fileName = os.path.join(self.biasDir, f"kde_{self._id}_{self._saveIndex}.pkl")
-        data = {"self": self._kde["self"]}
+        data = {"kde": self._kde["self"], "var": self._runningVariance["self"]}
         if self.exploreMode and REWEIGHTED_FES:
-            data["self_reweighted"] = self._kde["self_reweighted"]
+            data["rwkde"] = self._kde["self_reweighted"]
         with open(tempName, "wb") as file:
             pickle.dump(data, file)
         os.rename(tempName, fileName)
@@ -206,12 +248,14 @@ class OPES:
 
         if fileLoaded:
             self._kde["total"] = self._kde["self"].copy()
+            self._runningVariance["total"] = self._runningVariance["self"].copy()
             if self.exploreMode and REWEIGHTED_FES:
                 self._kde["total_reweighted"] = self._kde["self_reweighted"].copy()
             for bias in self._loadedBiases.values():
-                self._kde["total"] += bias.bias["self"]
+                self._kde["total"] += bias.bias["kde"]
+                self._runningVariance["total"] += bias.bias["var"]
                 if self.exploreMode and REWEIGHTED_FES:
-                    self._kde["total_reweighted"] += bias.bias["self_reweighted"]
+                    self._kde["total_reweighted"] += bias.bias["rwkde"]
 
     def getNumKernels(self):
         """Get the number of kernels in the kernel density estimator."""
@@ -272,6 +316,8 @@ class OPES:
         """Add a kernel to the PDF estimate and update the bias potential."""
         if not isinstance(energy, unit.Quantity):
             energy = energy * unit.kilojoules_per_mole
+        if variance is None:
+            variance = self._runningVariance["total"].get()
         logWeight = energy / self._kbt
         for case in self._cases:
             self._kde[case].update(
@@ -317,4 +363,4 @@ class OPES:
 
     def getVariance(self):
         """Get the variance of the probability distribution estimate."""
-        return self._kde["total"].getVariance()
+        return self._runningVariance["total"].get()

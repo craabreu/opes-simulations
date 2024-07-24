@@ -173,8 +173,6 @@ class OnlineKDE:
         self._logPG = np.full(cvSpace.gridShape, -np.inf)
         self._d = len(cvSpace.gridShape)
         self._varianceScale = varianceScale
-        self._numVarianceSamples = 0
-        self._sumVariance = np.zeros(self._d)
 
     def __getstate__(self):
         if self._kernels:
@@ -193,8 +191,6 @@ class OnlineKDE:
             "logPK": self._logPK,
             "logPG": self._logPG,
             "varianceScale": self._varianceScale,
-            "numVarianceSamples": self._numVarianceSamples,
-            "sumVariance": self._sumVariance,
             "kernelData": kernelData,
         }
 
@@ -206,8 +202,6 @@ class OnlineKDE:
         self._logPK = state["logPK"]
         self._logPG = state["logPG"]
         self._varianceScale = state["varianceScale"]
-        self._numVarianceSamples = state["numVarianceSamples"]
-        self._sumVariance = state["sumVariance"]
         self._kernels = [
             Kernel(self._cvSpace, *data) for data in zip(*state["kernelData"])
         ]
@@ -215,8 +209,6 @@ class OnlineKDE:
     def __iadd__(self, other):
         if not np.isclose(other._varianceScale, self._varianceScale):
             raise ValueError("Cannot add KDEs with incompatible variance scales")
-        self._numVarianceSamples += other._numVarianceSamples
-        self._sumVariance += other._sumVariance.copy()
         for k in other._kernels:
             self._addKernel(k.position, k.bandwidth, k.logWeight, False)
         return self
@@ -273,17 +265,11 @@ class OnlineKDE:
         new._logPK = self._logPK.copy()
         new._logPG = self._logPG.copy()
         new._varianceScale = self._varianceScale
-        new._numVarianceSamples = self._numVarianceSamples
-        new._sumVariance = self._sumVariance
         return new
 
     def getNumKernels(self):
         """Get the number of kernels in the kernel density estimator."""
         return len(self._kernels)
-
-    def getVariance(self):
-        """Get the variance of the sampled variables."""
-        return self._sumVariance / self._numVarianceSamples
 
     def getLogPDF(self):
         """Get the logarithm of the probability density function (PDF) on the grid."""
@@ -298,14 +284,8 @@ class OnlineKDE:
         """Get the logarithm of the ratio of the normalizing constants."""
         return self._logSumW - np.log(self._counter)
 
-    def updateVariance(self, squaredDeviationFromMean):
-        """Update the variance of the sampled variables."""
-        self._numVarianceSamples += 1
-        self._sumVariance += squaredDeviationFromMean
-
-    def update(self, position, logWeight, variance=None):
+    def update(self, position, logWeight, variance):
         """Update the KDE by depositing a new kernel."""
-        variance = self.getVariance() if variance is None else np.asarray(variance)
         bandwidth = np.sqrt(self._varianceScale * variance)
         self._addKernel(position, bandwidth, logWeight, True)
 
