@@ -26,7 +26,7 @@ simulate.VARIANCE_PACE = args.varfreq
 opes.REWEIGHTED_FES = not args.unreweighted
 opes.CORRECTED_OPES_EXPLORE = not args.uncorrected
 online_kde.BOUNDED_KERNELS = args.bounded
-online_kde.KEEP_GRID_UNCOMPRESSED = args.uncompressed
+online_kde.UNCOMPRESSED_KDE = args.uncompressed
 
 num_processes = args.np
 method = args.method
@@ -53,7 +53,7 @@ if __name__ == "__main__":
             f"opes.REWEIGHTED_FES={opes.REWEIGHTED_FES}\n"
             f"opes.CORRECTED_OPES_EXPLORE={opes.CORRECTED_OPES_EXPLORE}\n"
             f"online_kde.BOUNDED_KERNELS={online_kde.BOUNDED_KERNELS}\n"
-            f"online_kde.KEEP_GRID_UNCOMPRESSED={online_kde.KEEP_GRID_UNCOMPRESSED}\n"
+            f"online_kde.UNCOMPRESSED_KDE={online_kde.UNCOMPRESSED_KDE}\n"
             f"execution_times={times.mean():.3f} +/- {times.std():.3f} s\n"
         )
     print(f"Done in {times.mean():.3f} +/- {times.std():.3f} s")

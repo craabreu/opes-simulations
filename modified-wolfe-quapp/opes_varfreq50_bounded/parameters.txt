@@ -3,5 +3,5 @@ simulate.VARIANCE_PACE=50
 opes.REWEIGHTED_FES=True
 opes.CORRECTED_OPES_EXPLORE=True
 online_kde.BOUNDED_KERNELS=True
-online_kde.KEEP_GRID_UNCOMPRESSED=False
+online_kde.UNCOMPRESSED_KDE=False
 execution_times=229.363 +/- 5.006 s

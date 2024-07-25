@@ -16,44 +16,42 @@ USE_PDF_OPES_EXPLORE = True
 REWEIGHTED_FES = True
 
 
-class RunningVariance:
-    """Class to handle variance calculations for sampled variables."""
+class RunningAverage:
+    """Class to handle running average calculations."""
 
-    def __init__(self, numDimensions):
-        self._numVarianceSamples = 0
-        self._sumVariance = np.zeros(numDimensions)
+    def __init__(self, numDimensions=None):
+        self._numSamples = 0
+        self._sumSamples = 0 if numDimensions is None else np.zeros(numDimensions)
 
     def __getstate__(self):
-        return {
-            "numVarianceSamples": self._numVarianceSamples,
-            "sumVariance": self._sumVariance,
-        }
+        return {"numSamples": self._numSamples, "sumSamples": self._sumSamples}
 
     def __setstate__(self, state):
-        self._numVarianceSamples = state["numVarianceSamples"]
-        self._sumVariance = state["sumVariance"]
+        self._numSamples = state["numSamples"]
+        self._sumSamples = state["sumSamples"]
 
     def __iadd__(self, other):
-        self._sumVariance += other._sumVariance
-        self._numVarianceSamples += other._numVarianceSamples
+        self._sumSamples += other._sumSamples
+        self._numSamples += other._numSamples
         return self
 
     def copy(self):
-        new = self.__class__(self._sumVariance.shape[0])
-        new._numVarianceSamples = self._numVarianceSamples
-        new._sumVariance = self._sumVariance
+        d = None if np.isscalar(self._sumSamples) else self._sumSamples.shape[0]
+        new = self.__class__(d)
+        new._numSamples = self._numSamples
+        new._sumSamples = self._sumSamples
         return new
 
-    def update(self, squaredDeviationFromMean):
-        """Update the variance with a new squared deviation from the mean."""
-        self._numVarianceSamples += 1
-        self._sumVariance += squaredDeviationFromMean
+    def update(self, sample):
+        """Update the running average with a new sample."""
+        self._numSamples += 1
+        self._sumSamples += sample
 
     def get(self):
-        """Get the variance of the sampled variables."""
-        if self._numVarianceSamples == 0:
-            return np.zeros_like(self._sumVariance)
-        return self._sumVariance / self._numVarianceSamples
+        """Get the running average."""
+        if self._numSamples == 0:
+            return np.zeros_like(self._sumSamples)
+        return self._sumSamples / self._numSamples
 
 
 class OPES:
@@ -147,7 +145,7 @@ class OPES:
 
         self._adaptiveVariance = varianceFrequency is not None
         self._interval = varianceFrequency or frequency
-        self._runningVariance = {case: RunningVariance(d) for case in self._cases}
+        self._variance = {case: RunningAverage(d) for case in self._cases}
         if self._adaptiveVariance:
             self._tau = STATS_WINDOW_SIZE * frequency // varianceFrequency
             self._counter = 0
@@ -155,7 +153,7 @@ class OPES:
         else:
             sqdev = np.array([cv.biasWidth**2 for cv in variables])
             for case in self._cases:
-                self._runningVariance[case].update(sqdev)
+                self._variance[case].update(sqdev)
 
         if saveFrequency:
             self._id = np.random.RandomState().randint(0x7FFFFFFF)
@@ -205,7 +203,7 @@ class OPES:
         self._sampleMean = self._cvSpace.endpoint(self._sampleMean, x * delta)
         sqdev = delta * self._cvSpace.displacement(self._sampleMean, values)
         for case in self._cases:
-            self._runningVariance[case].update(sqdev)
+            self._variance[case].update(sqdev)
 
     def _syncWithDisk(self):
         """
@@ -216,7 +214,7 @@ class OPES:
         self._saveIndex += 1
         tempName = os.path.join(self.biasDir, f"temp_{self._id}_{self._saveIndex}.pkl")
         fileName = os.path.join(self.biasDir, f"kde_{self._id}_{self._saveIndex}.pkl")
-        data = {"kde": self._kde["self"], "var": self._runningVariance["self"]}
+        data = {"kde": self._kde["self"], "var": self._variance["self"]}
         if self.exploreMode and REWEIGHTED_FES:
             data["kde_rw"] = self._kde["self_rw"]
         with open(tempName, "wb") as file:
@@ -251,12 +249,12 @@ class OPES:
 
         if fileLoaded:
             self._kde["total"] = self._kde["self"].copy()
-            self._runningVariance["total"] = self._runningVariance["self"].copy()
+            self._variance["total"] = self._variance["self"].copy()
             if self.exploreMode and REWEIGHTED_FES:
                 self._kde["total_rw"] = self._kde["self_rw"].copy()
             for bias in self._loadedBiases.values():
                 self._kde["total"] += bias.bias["kde"]
-                self._runningVariance["total"] += bias.bias["var"]
+                self._variance["total"] += bias.bias["var"]
                 if self.exploreMode and REWEIGHTED_FES:
                     self._kde["total_rw"] += bias.bias["kde_rw"]
 
@@ -288,7 +286,11 @@ class OPES:
             if not USE_PDF_OPES_EXPLORE:
                 return -self._kbt * self.getBias() * self._biasFactor / self._prefactor
             return freeEnergy * self._biasFactor
-        return freeEnergy - self.getBias() + self._kde["total"].getLogNormConstRatio()
+        return (
+            freeEnergy
+            - self.getBias()
+            + self._kde["total"].getLogNormConstRatio() * unit.kilojoules_per_mole
+        )
 
     def getAverageDensity(self):
         """
@@ -320,7 +322,7 @@ class OPES:
         if not isinstance(biasEnergy, unit.Quantity):
             biasEnergy = biasEnergy * unit.kilojoules_per_mole
         if variance is None:
-            variance = self._runningVariance["total"].get()
+            variance = self._variance["total"].get()
         logWeight = biasEnergy / self._kbt
         for kde in self._kde.values():
             kde.update(values, logWeight, variance)
@@ -362,4 +364,4 @@ class OPES:
 
     def getVariance(self):
         """Get the variance of the probability distribution estimate."""
-        return self._runningVariance["total"].get()
+        return self._variance["total"].get()

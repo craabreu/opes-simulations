@@ -23,7 +23,7 @@ args = parser.parse_args()
 
 simulate.VARIANCE_PACE = args.varfreq
 online_kde.BOUNDED_KERNELS = args.bounded
-online_kde.KEEP_GRID_UNCOMPRESSED = args.uncompressed
+online_kde.UNCOMPRESSED_KDE = args.uncompressed
 online_kde.USE_EXISTING_BANDWIDTHS = not args.incomingbw
 
 num_processes = args.np
@@ -49,7 +49,7 @@ if __name__ == "__main__":
             f"method={method}\n"
             f"simulate.VARIANCE_PACE={simulate.VARIANCE_PACE}\n"
             f"online_kde.BOUNDED_KERNELS={online_kde.BOUNDED_KERNELS}\n"
-            f"online_kde.KEEP_GRID_UNCOMPRESSED={online_kde.KEEP_GRID_UNCOMPRESSED}\n"
+            f"online_kde.UNCOMPRESSED_KDE={online_kde.UNCOMPRESSED_KDE}\n"
             f"execution_times={times.mean():.3f} +/- {times.std():.3f} s\n"
         )
     print(f"Done in {times.mean():.3f} +/- {times.std():.3f} s")

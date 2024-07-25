@@ -1,6 +1,6 @@
 method=metad
 simulate.VARIANCE_PACE=50
 online_kde.BOUNDED_KERNELS=False
-online_kde.KEEP_GRID_UNCOMPRESSED=False
+online_kde.UNCOMPRESSED_KDE=False
 online_kde.USE_EXISTING_BANDWIDTHS=True
 execution_times=836.925 +/- 41.966 s

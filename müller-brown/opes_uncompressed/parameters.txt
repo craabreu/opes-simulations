@@ -1,6 +1,6 @@
 method=opes
 simulate.VARIANCE_PACE=50
 online_kde.BOUNDED_KERNELS=False
-online_kde.KEEP_GRID_UNCOMPRESSED=True
+online_kde.UNCOMPRESSED_KDE=True
 online_kde.USE_EXISTING_BANDWIDTHS=True
 execution_times=1827.091 +/- 35.748 s
