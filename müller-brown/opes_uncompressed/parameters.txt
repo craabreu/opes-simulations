@@ -3,4 +3,4 @@ simulate.VARIANCE_PACE=50
 online_kde.BOUNDED_KERNELS=False
 online_kde.UNCOMPRESSED_KDE=True
 online_kde.USE_EXISTING_BANDWIDTHS=True
-execution_times=1827.091 +/- 35.748 s
+execution_times=2118.372 +/- 128.657 s
