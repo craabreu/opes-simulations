@@ -19,39 +19,36 @@ REWEIGHTED_FES = True
 class RunningAverage:
     """Class to handle running average calculations."""
 
-    def __init__(self, numDimensions=None):
-        self._numSamples = 0
-        self._sumSamples = 0 if numDimensions is None else np.zeros(numDimensions)
+    def __init__(self, numDimensions=1):
+        self._num = 0
+        self._total = np.zeros(numDimensions)
 
     def __getstate__(self):
-        return {"numSamples": self._numSamples, "sumSamples": self._sumSamples}
+        return {"num": self._num, "total": self._total}
 
     def __setstate__(self, state):
-        self._numSamples = state["numSamples"]
-        self._sumSamples = state["sumSamples"]
+        self._num = state["num"]
+        self._total = state["total"]
 
     def __iadd__(self, other):
-        self._sumSamples += other._sumSamples
-        self._numSamples += other._numSamples
+        self._total += other._total
+        self._num += other._num
         return self
 
     def copy(self):
-        d = None if np.isscalar(self._sumSamples) else self._sumSamples.shape[0]
-        new = self.__class__(d)
-        new._numSamples = self._numSamples
-        new._sumSamples = self._sumSamples
+        new = self.__class__(self._total.shape[0])
+        new._num = self._num
+        new._total = self._total
         return new
 
     def update(self, sample):
         """Update the running average with a new sample."""
-        self._numSamples += 1
-        self._sumSamples += sample
+        self._num += 1
+        self._total += sample
 
     def get(self):
         """Get the running average."""
-        if self._numSamples == 0:
-            return np.zeros_like(self._sumSamples)
-        return self._sumSamples / self._numSamples
+        return self._total / max(1, self._num)
 
 
 class OPES:
