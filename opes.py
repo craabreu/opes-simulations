@@ -96,6 +96,7 @@ class OPES:
         varianceFrequency,
         biasFactor=None,
         exploreMode=False,
+        stateIDFuncs=(),
         saveFrequency=None,
         biasDir=None,
     ):
@@ -110,6 +111,7 @@ class OPES:
         self.varianceFrequency = varianceFrequency
         self.biasFactor = biasFactor
         self.exploreMode = exploreMode
+        self.stateIDFuncs = stateIDFuncs
         self.saveFrequency = saveFrequency
         self.biasDir = biasDir
 
@@ -152,6 +154,8 @@ class OPES:
             for case in self._cases:
                 self._variance[case].update(sqdev)
 
+        self._lastVisitedState = 0
+
         if saveFrequency:
             self._id = np.random.RandomState().randint(0x7FFFFFFF)
             self._saveIndex = 0
@@ -191,6 +195,8 @@ class OPES:
             raise ValueError("OPES requires 1, 2, or 3 collective variables")
         if not freeGroups:
             raise RuntimeError("OPES requires a free force group, but all are in use.")
+        if not all(map(callable, self.stateIDFuncs)):
+            raise ValueError("stateIDFuncs must be a list of functions")
 
     def _updateSampleStats(self, values):
         """Update the sample mean and variance of the collective variables."""
@@ -345,6 +351,10 @@ class OPES:
             simulation.step(nextSteps)
             if simulation.currentStep % self._interval == 0:
                 position = self.getCollectiveVariables(simulation)
+                for index, stateIDFunc in enumerate(self.stateIDFuncs):
+                    if stateIDFunc(position):
+                        self._lastVisitedState = index
+                        break
                 if self._adaptiveVariance:
                     self._updateSampleStats(position)
                 if simulation.currentStep % self.frequency == 0:
@@ -362,3 +372,7 @@ class OPES:
     def getVariance(self):
         """Get the variance of the probability distribution estimate."""
         return self._variance["total"].get()
+
+    def getLastVisitedState(self):
+        """Get the index of the last visited state."""
+        return self._lastVisitedState
