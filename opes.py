@@ -96,7 +96,7 @@ class OPES:
         varianceFrequency,
         biasFactor=None,
         exploreMode=False,
-        stateIDFuncs=(),
+        stateIDFuncs=(lambda _: True,),
         saveFrequency=None,
         biasDir=None,
     ):
@@ -134,13 +134,16 @@ class OPES:
         self._cvSpace = CVSpace(variables)
         self._cases = ("total",) + ("self",) * bool(saveFrequency)
         self._kde = {}
+        numLabels = len(self.stateIDFuncs)
         for case in self._cases:
             if exploreMode:
-                self._kde[case] = OnlineKDE(self._cvSpace, 1.0, False)
+                self._kde[case] = OnlineKDE(self._cvSpace, 1.0, False, numLabels)
                 if REWEIGHTED_FES:
-                    self._kde[f"{case}_rw"] = OnlineKDE(self._cvSpace, varScale, True)
+                    self._kde[f"{case}_rw"] = OnlineKDE(
+                        self._cvSpace, varScale, True, numLabels
+                    )
             else:
-                self._kde[case] = OnlineKDE(self._cvSpace, varScale, True)
+                self._kde[case] = OnlineKDE(self._cvSpace, varScale, True, numLabels)
 
         self._adaptiveVariance = varianceFrequency is not None
         self._interval = varianceFrequency or frequency
@@ -328,7 +331,7 @@ class OPES:
             variance = self._variance["total"].get()
         logWeight = biasEnergy / self._kbt
         for kde in self._kde.values():
-            kde.update(values, logWeight, variance)
+            kde.update(values, logWeight, variance, self._lastVisitedState)
 
     def step(self, simulation, steps):
         """
