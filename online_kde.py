@@ -204,7 +204,7 @@ class OnlineKDE:
         self._logSumWSq = -np.inf
         self._logPK = np.empty(0)
         self._logPG = np.full(cvSpace.gridShape, -np.inf)
-        self._maskPG = np.full(cvSpace.gridShape, False)
+        self._maskPG = np.full(cvSpace.gridShape, False) if UNCOMPRESSED_KDE else None
         self._d = len(cvSpace.gridShape)
         self._varianceScale = varianceScale
         self._reweighting = reweighting
@@ -227,8 +227,8 @@ class OnlineKDE:
             "sumW": self._logSumW,
             "sumWSq": self._logSumWSq,
             "logPK": self._logPK,
-            "logPG": self._logPG,
-            "maskPG": self._maskPG,
+            "logPG": self._logPG if UNCOMPRESSED_KDE else None,
+            "maskPG": self._maskPG if UNCOMPRESSED_KDE else None,
             "varianceScale": self._varianceScale,
             "reweighting": self._reweighting,
             "numLabels": self._numLabels,
@@ -249,6 +249,10 @@ class OnlineKDE:
         self._kernels = [
             Kernel(self._cvSpace, *data) for data in zip(*state["kernelData"])
         ]
+        if self._logPG is None:
+            self._logPG = functools.reduce(
+                np.logaddexp, (k.evaluateOnGrid() for k in self._kernels)
+            )
 
     def __iadd__(self, other):
         if other._reweighting != self._reweighting:
