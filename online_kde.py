@@ -224,8 +224,8 @@ class OnlineKDE:
         return {
             "cvSpace": self._cvSpace,
             "numSamples": self._numSamples,
-            "sumW": self._logSumW,
-            "sumWSq": self._logSumWSq,
+            "logSumW": self._logSumW,
+            "logSumWSq": self._logSumWSq,
             "logPK": self._logPK,
             "logPG": self._logPG if UNCOMPRESSED_KDE else None,
             "maskPG": self._maskPG if UNCOMPRESSED_KDE else None,
@@ -238,8 +238,8 @@ class OnlineKDE:
     def __setstate__(self, state):
         self.__init__(state["cvSpace"])
         self._numSamples = state["numSamples"]
-        self._logSumW = state["sumW"]
-        self._logSumWSq = state["sumWSq"]
+        self._logSumW = state["logSumW"]
+        self._logSumWSq = state["logSumWSq"]
         self._logPK = state["logPK"]
         self._logPG = state["logPG"]
         self._maskPG = state["maskPG"]
@@ -253,6 +253,11 @@ class OnlineKDE:
             self._logPG = functools.reduce(
                 np.logaddexp, (k.evaluateOnGrid() for k in self._kernels)
             )
+        print(
+            self._reweighting,
+            self._logSumW,
+            np.logaddexp.reduce([k.logWeight for k in self._kernels]),
+        )
 
     def __iadd__(self, other):
         if other._reweighting != self._reweighting:
@@ -284,13 +289,24 @@ class OnlineKDE:
     def _logDenominator(self):
         return self._logSumW if self._reweighting else np.log(self._numSamples)
 
+    def _removeKernels(self, centers, toRemove):
+        toRemove = sorted(toRemove, reverse=True)
+        for index in toRemove:
+            k = self._kernels.pop(index)
+            self._logPK = logsubexp(self._logPK, k.evaluate(centers))
+            self._logPG = logsubexp(self._logPG, k.evaluateOnGrid())
+        self._logPK = np.delete(self._logPK, toRemove)
+
     def _addKernel(self, position, bandwidth, logWeight, fractions, adjustBandwidth):
         """Update the KDE by depositing a new kernel."""
         self._numSamples += 1
         self._logSumW = np.logaddexp(self._logSumW, logWeight)
         self._logSumWSq = np.logaddexp(self._logSumWSq, 2 * logWeight)
         if adjustBandwidth:
-            neff = np.exp(2 * self._logSumW - self._logSumWSq)
+            if self._reweighting:
+                neff = np.exp(2 * self._logSumW - self._logSumWSq)
+            else:
+                neff = self._numSamples
             silverman = (neff * (self._d + 2) / 4) ** (-1 / (self._d + 4))
             bandwidth = bandwidth * silverman
         newKernel = Kernel(
@@ -318,12 +334,7 @@ class OnlineKDE:
             self._logPK = np.logaddexp(self._logPK, newKernel.evaluate(centers))
             self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
             if toRemove:
-                toRemove = sorted(toRemove, reverse=True)
-                for index in toRemove:
-                    k = self._kernels.pop(index)
-                    self._logPK = logsubexp(self._logPK, k.evaluate(centers))
-                    self._logPG = logsubexp(self._logPG, k.evaluateOnGrid())
-                self._logPK = np.delete(self._logPK, toRemove)
+                self._removeKernels(centers, toRemove)
             self._kernels.append(newKernel)
             logNewP = [k.evaluate(newKernel.position) for k in self._kernels]
             self._logPK = np.append(self._logPK, np.logaddexp.reduce(logNewP))
