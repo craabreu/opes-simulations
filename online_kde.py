@@ -284,6 +284,30 @@ class OnlineKDE:
     def _logDenominator(self):
         return self._logSumW if self._reweighting else np.log(self._numSamples)
 
+    def _insertKernel(self, newKernel, enforceMerge=False):
+        centers = np.stack([k.position for k in self._kernels])
+        if USE_EXISTING_BANDWIDTHS:
+            bandwidths = np.stack([k.bandwidth for k in self._kernels])
+        else:
+            bandwidths = newKernel.bandwidth
+        index, minSqDist = newKernel.findNearest(centers, bandwidths)
+        toRemove = []
+        while minSqDist <= COMPRESSION_THRESHOLD**2 or enforceMerge:
+            toRemove.append(index)
+            newKernel.merge(self._kernels[index])
+            index, minSqDist = newKernel.findNearest(centers, bandwidths, toRemove)
+            enforceMerge = False
+        self._logPK = np.logaddexp(self._logPK, newKernel.evaluate(centers))
+        self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
+        if toRemove:
+            toRemove = sorted(toRemove, reverse=True)
+            for index in toRemove:
+                k = self._kernels.pop(index)
+                self._logPK = logsubexp(self._logPK, k.evaluate(centers))
+                self._logPG = logsubexp(self._logPG, k.evaluateOnGrid())
+            self._logPK = np.delete(self._logPK, toRemove)
+        self._kernels.append(newKernel)
+
     def _addKernel(self, position, bandwidth, logWeight, fractions, adjustBandwidth):
         """Update the KDE by depositing a new kernel."""
         self._numSamples += 1
@@ -304,27 +328,7 @@ class OnlineKDE:
             self._maskPG[self._cvSpace.closestNode(position)] = True
             self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
         elif self._kernels:
-            centers = np.stack([k.position for k in self._kernels])
-            if USE_EXISTING_BANDWIDTHS:
-                bandwidths = np.stack([k.bandwidth for k in self._kernels])
-            else:
-                bandwidths = bandwidth
-            index, minSqDist = newKernel.findNearest(centers, bandwidths)
-            toRemove = []
-            while minSqDist <= COMPRESSION_THRESHOLD**2:
-                toRemove.append(index)
-                newKernel.merge(self._kernels[index])
-                index, minSqDist = newKernel.findNearest(centers, bandwidths, toRemove)
-            self._logPK = np.logaddexp(self._logPK, newKernel.evaluate(centers))
-            self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
-            if toRemove:
-                toRemove = sorted(toRemove, reverse=True)
-                for index in toRemove:
-                    k = self._kernels.pop(index)
-                    self._logPK = logsubexp(self._logPK, k.evaluate(centers))
-                    self._logPG = logsubexp(self._logPG, k.evaluateOnGrid())
-                self._logPK = np.delete(self._logPK, toRemove)
-            self._kernels.append(newKernel)
+            self._insertKernel(newKernel)
             logNewP = [k.evaluate(newKernel.position) for k in self._kernels]
             self._logPK = np.append(self._logPK, np.logaddexp.reduce(logNewP))
         else:
@@ -333,6 +337,7 @@ class OnlineKDE:
             self._logPK = np.array([newKernel.logHeight])
 
     def copy(self):
+        """Return a copy of the kernel density estimator."""
         new = self.__class__(self._cvSpace)
         new._kernels = self._kernels.copy()
         new._logSumW = self._logSumW
