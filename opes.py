@@ -379,3 +379,14 @@ class OPES:
     def getLastVisitedState(self):
         """Get the index of the last visited state."""
         return self._lastVisitedState
+
+    def getRecollectorVariable(self, label):
+        """Get the recollector function."""
+        force = self._force.__copy__()
+        kde = self._kde["total"]
+        force.getTabulatedFunction(0).setFunctionParameters(
+            *self._widths,
+            np.exp(kde.getLogPDF(label) - kde.getLogPDF()).ravel(),
+            *self._limits,
+        )
+        return force

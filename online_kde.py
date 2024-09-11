@@ -123,7 +123,11 @@ class Kernel:
         return self.cvSpace.displacement(self.position, centers) / bandwidths
 
     def _logFraction(self, label):
-        return 0.0 if label is None else np.log(self.fractions[label])
+        if label is None:
+            return 0.0
+        if self.fractions[label] == 0.0:
+            return -np.inf
+        return np.log(self.fractions[label])
 
     @staticmethod
     def _exponents(x):
@@ -342,9 +346,15 @@ class OnlineKDE:
         """Get the number of kernels in the kernel density estimator."""
         return len(self._kernels)
 
-    def getLogPDF(self):
+    def getLogPDF(self, label=None):
         """Get the logarithm of the probability density function (PDF) on the grid."""
-        return self._logPG - self._logDenominator()
+        if label is None:
+            logP = self._logPG
+        else:
+            logP = functools.reduce(
+                np.logaddexp, (k.evaluateOnGrid(label) for k in self._kernels)
+            )
+        return logP - self._logDenominator()
 
     def getLogMeanDensity(self):
         """Get the logarithm of the mean density."""
