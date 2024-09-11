@@ -1,4 +1,5 @@
 *.csv.gz
+*.pkl
 !*means.csv.gz
 profile*.csv
 __pycache__
