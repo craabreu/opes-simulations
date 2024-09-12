@@ -102,14 +102,17 @@ class CVSpace:
 class Kernel:
     """A multivariate kernel function with zero covariance."""
 
-    def __init__(self, cvSpace, position, bandwidth, logWeight, fractions=(1.0,)):
+    def __init__(
+        self, cvSpace, position, bandwidth, logWeight, fractions=(1.0,), numSamples=1
+    ):
         self.cvSpace = cvSpace
         self.position = np.array(position)
         self.bandwidth = np.array(bandwidth)
         self.logWeight = logWeight
         if not np.isclose(np.sum(fractions), 1.0):
             raise ValueError("fractions must sum to 1.0")
-        self.fractions = fractions
+        self.fractions = np.array(fractions)
+        self.numSamples = numSamples
         self.logHeight = self._computeLogHeight()
 
     def _computeLogHeight(self):
@@ -167,6 +170,7 @@ class Kernel:
         )
         self.fractions += w2 * (other.fractions - self.fractions)
         self.logWeight = logSumWeights
+        self.numSamples += other.numSamples
         self.logHeight = self._computeLogHeight()
 
     def evaluate(self, centers, label=None):
@@ -199,7 +203,6 @@ class OnlineKDE:
     def __init__(self, cvSpace, numLabels=1):
         self._kernels = []
         self._cvSpace = cvSpace
-        self._numSamples = 0
         self._logSumW = -np.inf
         self._logSumWSq = -np.inf
         self._logPK = np.empty(0)
@@ -221,7 +224,6 @@ class OnlineKDE:
             kernelData = []
         return {
             "cvSpace": self._cvSpace,
-            "numSamples": self._numSamples,
             "logSumW": self._logSumW,
             "logSumWSq": self._logSumWSq,
             "logPK": self._logPK,
@@ -233,7 +235,6 @@ class OnlineKDE:
 
     def __setstate__(self, state):
         self.__init__(state["cvSpace"])
-        self._numSamples = state["numSamples"]
         self._logSumW = state["logSumW"]
         self._logSumWSq = state["logSumWSq"]
         self._logPK = state["logPK"]
@@ -252,7 +253,6 @@ class OnlineKDE:
         if other._numLabels != self._numLabels:
             raise ValueError("Cannot add KDEs with incompatible numbers of labels")
         if UNCOMPRESSED_KDE:
-            self._numSamples += other._numSamples
             self._logSumW = np.logaddexp(self._logSumW, other._logSumW)
             self._logSumWSq = np.logaddexp(self._logSumWSq, other._logSumWSq)
             self._logPG = np.logaddexp(self._logPG, other._logPG)
@@ -264,6 +264,7 @@ class OnlineKDE:
                     k.bandwidth,
                     k.logWeight,
                     k.fractions,
+                    k.numSamples,
                     adjustBandwidth=False,
                 )
         return self
@@ -279,16 +280,25 @@ class OnlineKDE:
             self._logPG = logsubexp(self._logPG, k.evaluateOnGrid())
         self._logPK = np.delete(self._logPK, toRemove)
 
-    def _addKernel(self, position, bandwidth, logWeight, fractions, adjustBandwidth):
+    def _addKernel(
+        self,
+        position,
+        bandwidth,
+        logWeight,
+        fractions,
+        numSamples=1,
+        adjustBandwidth=True,
+    ):
         """Update the KDE by depositing a new kernel."""
-        self._numSamples += 1
         self._logSumW = np.logaddexp(self._logSumW, logWeight)
         self._logSumWSq = np.logaddexp(self._logSumWSq, 2 * logWeight)
         if adjustBandwidth:
             neff = np.exp(2 * self._logSumW - self._logSumWSq)
             silverman = (neff * (self._d + 2) / 4) ** (-1 / (self._d + 4))
             bandwidth = bandwidth * silverman
-        newKernel = Kernel(self._cvSpace, position, bandwidth, logWeight, fractions)
+        newKernel = Kernel(
+            self._cvSpace, position, bandwidth, logWeight, fractions, numSamples
+        )
         if UNCOMPRESSED_KDE:
             self._maskPG[self._cvSpace.closestNode(position)] = True
             self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
@@ -321,7 +331,6 @@ class OnlineKDE:
         new._kernels = self._kernels.copy()
         new._logSumW = self._logSumW
         new._logSumWSq = self._logSumWSq
-        new._numSamples = self._numSamples
         new._logPK = self._logPK.copy()
         new._logPG = self._logPG.copy()
         new._maskPG = None if self._maskPG is None else self._maskPG.copy()
@@ -330,10 +339,10 @@ class OnlineKDE:
 
     def getPrunedCopy(self, threshold=0.0):
         kde = self.copy()
-        logWeights = np.array([k.logWeight for k in kde._kernels])
-        indices = np.argsort(logWeights)
-        logAccWeight = np.logaddexp.accumulate(logWeights[indices])
-        numRemovals = np.sum(logAccWeight < kde.self._logSumW + np.log(threshold))
+        numSamples = np.array([k.numSamples for k in kde._kernels])
+        indices = np.argsort(numSamples)
+        accNumSamples = np.cumsum(numSamples[indices])
+        numRemovals = np.sum(accNumSamples < accNumSamples[-1] * threshold)
         if numRemovals > 0:
             centers = np.stack([k.position for k in kde._kernels])
             kde._removeKernels(centers, indices[:numRemovals])
@@ -363,16 +372,11 @@ class OnlineKDE:
             n = len(self._kernels)
         return logP - np.log(n) - self._logSumW
 
-    def getLogNormConstRatio(self):
-        """Get the logarithm of the ratio of the normalizing constants."""
-        return self._logSumW - np.log(self._numSamples)
-
     def update(self, position, logWeight, variance, label=0):
         """Update the KDE by depositing a new kernel."""
-        bandwidth = np.sqrt(variance)
         fractions = np.zeros(self._numLabels)
         fractions[label] = 1
-        self._addKernel(position, bandwidth, logWeight, fractions, True)
+        self._addKernel(position, np.sqrt(variance), logWeight, fractions)
 
     def evaluate(self, point):
         """Evaluate the logarithm of the kernel at the given point."""
