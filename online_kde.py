@@ -253,11 +253,6 @@ class OnlineKDE:
             self._logPG = functools.reduce(
                 np.logaddexp, (k.evaluateOnGrid() for k in self._kernels)
             )
-        print(
-            self._reweighting,
-            self._logSumW,
-            np.logaddexp.reduce([k.logWeight for k in self._kernels]),
-        )
 
     def __iadd__(self, other):
         if other._reweighting != self._reweighting:
@@ -304,9 +299,9 @@ class OnlineKDE:
         self._logSumWSq = np.logaddexp(self._logSumWSq, 2 * logWeight)
         if adjustBandwidth:
             if self._reweighting:
-                neff = np.exp(2 * self._logSumW - self._logSumWSq)
-            else:
                 neff = self._numSamples
+            else:
+                neff = np.exp(2 * self._logSumW - self._logSumWSq)
             silverman = (neff * (self._d + 2) / 4) ** (-1 / (self._d + 4))
             bandwidth = bandwidth * silverman
         newKernel = Kernel(
@@ -351,11 +346,22 @@ class OnlineKDE:
         new._numSamples = self._numSamples
         new._logPK = self._logPK.copy()
         new._logPG = self._logPG.copy()
-        new._maskPG = self._maskPG.copy()
+        new._maskPG = None if self._maskPG is None else self._maskPG.copy()
         new._varianceScale = self._varianceScale
         new._reweighting = self._reweighting
         new._numLabels = self._numLabels
         return new
+
+    def getPrunedCopy(self, threshold=0.0):
+        kde = self.copy()
+        logWeights = np.array([k.logWeight for k in kde._kernels])
+        indices = np.argsort(logWeights)
+        logAccWeight = np.logaddexp.accumulate(logWeights[indices])
+        numRemovals = np.sum(logAccWeight < kde._logDenominator() + np.log(threshold))
+        if numRemovals > 0:
+            centers = np.stack([k.position for k in kde._kernels])
+            kde._removeKernels(centers, indices[:numRemovals])
+        return kde
 
     def getNumKernels(self):
         """Get the number of kernels in the kernel density estimator."""
