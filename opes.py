@@ -130,20 +130,14 @@ class OPES:
         self._prefactor = prefactor
         self._logEpsilon = -barrier / prefactor
 
-        varScale = 1.0 / biasFactor
         self._cvSpace = CVSpace(variables)
         self._cases = ("total",) + ("self",) * bool(saveFrequency)
         self._kde = {}
         numLabels = len(self.stateIDFuncs)
         for case in self._cases:
-            if exploreMode:
-                self._kde[case] = OnlineKDE(self._cvSpace, 1.0, False, numLabels)
-                if REWEIGHTED_FES:
-                    self._kde[f"{case}_rw"] = OnlineKDE(
-                        self._cvSpace, varScale, True, numLabels
-                    )
-            else:
-                self._kde[case] = OnlineKDE(self._cvSpace, varScale, True, numLabels)
+            self._kde[case] = OnlineKDE(self._cvSpace, numLabels)
+            if exploreMode and REWEIGHTED_FES:
+                self._kde[f"{case}.rw"] = OnlineKDE(self._cvSpace, numLabels)
 
         self._adaptiveVariance = varianceFrequency is not None
         self._interval = varianceFrequency or frequency
@@ -222,7 +216,7 @@ class OPES:
         fileName = os.path.join(self.biasDir, f"kde_{self._id}_{self._saveIndex}.pkl")
         data = {"kde": self._kde["self"], "var": self._variance["self"]}
         if self.exploreMode and REWEIGHTED_FES:
-            data["kde_rw"] = self._kde["self_rw"]
+            data["kde.rw"] = self._kde["self.rw"]
         with open(tempName, "wb") as file:
             pickle.dump(data, file)
         os.rename(tempName, fileName)
@@ -257,12 +251,12 @@ class OPES:
             self._kde["total"] = self._kde["self"].copy()
             self._variance["total"] = self._variance["self"].copy()
             if self.exploreMode and REWEIGHTED_FES:
-                self._kde["total_rw"] = self._kde["self_rw"].copy()
+                self._kde["total.rw"] = self._kde["self.rw"].copy()
             for bias in self._loadedBiases.values():
                 self._kde["total"] += bias.bias["kde"]
                 self._variance["total"] += bias.bias["var"]
                 if self.exploreMode and REWEIGHTED_FES:
-                    self._kde["total_rw"] += bias.bias["kde_rw"]
+                    self._kde["total.rw"] += bias.bias["kde.rw"]
 
     def getNumKernels(self):
         """Get the number of kernels in the kernel density estimator."""
@@ -284,7 +278,7 @@ class OPES:
         axis corresponds to minValue + i*(maxValue-minValue)/gridWidth.
         """
         if self.exploreMode and REWEIGHTED_FES:
-            return -self._kbt * self._kde["total_rw"].getLogPDF()
+            return -self._kbt * self._kde["total.rw"].getLogPDF()
         freeEnergy = -self._kbt * self._kde["total"].getLogPDF()
         if not self.exploreMode:
             return freeEnergy
@@ -292,11 +286,7 @@ class OPES:
             if not USE_PDF_OPES_EXPLORE:
                 return -self._kbt * self.getBias() * self._biasFactor / self._prefactor
             return freeEnergy * self._biasFactor
-        return (
-            freeEnergy
-            - self.getBias()
-            + self._kde["total"].getLogNormConstRatio() * unit.kilojoules_per_mole
-        )
+        return freeEnergy - self.getBias()
 
     def getAverageDensity(self):
         """
@@ -329,9 +319,15 @@ class OPES:
             biasEnergy = biasEnergy * unit.kilojoules_per_mole
         if variance is None:
             variance = self._variance["total"].get()
-        logWeight = biasEnergy / self._kbt
-        for kde in self._kde.values():
-            kde.update(values, logWeight, variance, self._lastVisitedState)
+        betaEnergy = biasEnergy / self._kbt
+        logWeight = 0.0 if self.exploreMode else betaEnergy
+        label = self._lastVisitedState
+        for case in self._cases:
+            self._kde[case].update(values, logWeight, variance, label)
+            if self.exploreMode and REWEIGHTED_FES:
+                self._kde[f"{case}.rw"].update(
+                    values, betaEnergy, variance / self._biasFactor, label
+                )
 
     def step(self, simulation, steps):
         """

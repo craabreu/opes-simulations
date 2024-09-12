@@ -196,7 +196,7 @@ class Kernel:
 class OnlineKDE:
     """Online Kernel Density Estimation (KDE) for collective variable sampling."""
 
-    def __init__(self, cvSpace, varianceScale=1.0, reweighting=False, numLabels=1):
+    def __init__(self, cvSpace, numLabels=1):
         self._kernels = []
         self._cvSpace = cvSpace
         self._numSamples = 0
@@ -206,8 +206,6 @@ class OnlineKDE:
         self._logPG = np.full(cvSpace.gridShape, -np.inf)
         self._maskPG = np.full(cvSpace.gridShape, False) if UNCOMPRESSED_KDE else None
         self._d = len(cvSpace.gridShape)
-        self._varianceScale = varianceScale
-        self._reweighting = reweighting
         self._numLabels = numLabels
 
     def __getstate__(self):
@@ -229,8 +227,6 @@ class OnlineKDE:
             "logPK": self._logPK,
             "logPG": self._logPG if UNCOMPRESSED_KDE else None,
             "maskPG": self._maskPG if UNCOMPRESSED_KDE else None,
-            "varianceScale": self._varianceScale,
-            "reweighting": self._reweighting,
             "numLabels": self._numLabels,
             "kernelData": kernelData,
         }
@@ -243,8 +239,6 @@ class OnlineKDE:
         self._logPK = state["logPK"]
         self._logPG = state["logPG"]
         self._maskPG = state["maskPG"]
-        self._varianceScale = state["varianceScale"]
-        self._reweighting = state["reweighting"]
         self._numLabels = state["numLabels"]
         self._kernels = [
             Kernel(self._cvSpace, *data) for data in zip(*state["kernelData"])
@@ -255,10 +249,6 @@ class OnlineKDE:
             )
 
     def __iadd__(self, other):
-        if other._reweighting != self._reweighting:
-            raise ValueError("Cannot add KDEs with incompatible reweighting flags")
-        if not np.isclose(other._varianceScale, self._varianceScale):
-            raise ValueError("Cannot add KDEs with incompatible variance scales")
         if other._numLabels != self._numLabels:
             raise ValueError("Cannot add KDEs with incompatible numbers of labels")
         if UNCOMPRESSED_KDE:
@@ -281,9 +271,6 @@ class OnlineKDE:
     def __bool__(self):
         return self._numSamples > 0
 
-    def _logDenominator(self):
-        return self._logSumW if self._reweighting else np.log(self._numSamples)
-
     def _removeKernels(self, centers, toRemove):
         toRemove = sorted(toRemove, reverse=True)
         for index in toRemove:
@@ -298,19 +285,10 @@ class OnlineKDE:
         self._logSumW = np.logaddexp(self._logSumW, logWeight)
         self._logSumWSq = np.logaddexp(self._logSumWSq, 2 * logWeight)
         if adjustBandwidth:
-            if self._reweighting:
-                neff = self._numSamples
-            else:
-                neff = np.exp(2 * self._logSumW - self._logSumWSq)
+            neff = np.exp(2 * self._logSumW - self._logSumWSq)
             silverman = (neff * (self._d + 2) / 4) ** (-1 / (self._d + 4))
             bandwidth = bandwidth * silverman
-        newKernel = Kernel(
-            self._cvSpace,
-            position,
-            bandwidth,
-            logWeight if self._reweighting else 0.0,
-            fractions,
-        )
+        newKernel = Kernel(self._cvSpace, position, bandwidth, logWeight, fractions)
         if UNCOMPRESSED_KDE:
             self._maskPG[self._cvSpace.closestNode(position)] = True
             self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
@@ -347,8 +325,6 @@ class OnlineKDE:
         new._logPK = self._logPK.copy()
         new._logPG = self._logPG.copy()
         new._maskPG = None if self._maskPG is None else self._maskPG.copy()
-        new._varianceScale = self._varianceScale
-        new._reweighting = self._reweighting
         new._numLabels = self._numLabels
         return new
 
@@ -357,7 +333,7 @@ class OnlineKDE:
         logWeights = np.array([k.logWeight for k in kde._kernels])
         indices = np.argsort(logWeights)
         logAccWeight = np.logaddexp.accumulate(logWeights[indices])
-        numRemovals = np.sum(logAccWeight < kde._logDenominator() + np.log(threshold))
+        numRemovals = np.sum(logAccWeight < kde.self._logSumW + np.log(threshold))
         if numRemovals > 0:
             centers = np.stack([k.position for k in kde._kernels])
             kde._removeKernels(centers, indices[:numRemovals])
@@ -375,7 +351,7 @@ class OnlineKDE:
             logP = functools.reduce(
                 np.logaddexp, (k.evaluateOnGrid(label) for k in self._kernels)
             )
-        return logP - self._logDenominator()
+        return logP - self._logSumW
 
     def getLogMeanDensity(self):
         """Get the logarithm of the mean density."""
@@ -385,7 +361,7 @@ class OnlineKDE:
         else:
             logP = np.logaddexp.reduce(self._logPK)
             n = len(self._kernels)
-        return logP - np.log(n) - self._logDenominator()
+        return logP - np.log(n) - self._logSumW
 
     def getLogNormConstRatio(self):
         """Get the logarithm of the ratio of the normalizing constants."""
@@ -393,7 +369,7 @@ class OnlineKDE:
 
     def update(self, position, logWeight, variance, label=0):
         """Update the KDE by depositing a new kernel."""
-        bandwidth = np.sqrt(self._varianceScale * variance)
+        bandwidth = np.sqrt(variance)
         fractions = np.zeros(self._numLabels)
         fractions[label] = 1
         self._addKernel(position, bandwidth, logWeight, fractions, True)
@@ -404,4 +380,4 @@ class OnlineKDE:
             logP = self._logPG[self._cvSpace.closestNode(point)]
         else:
             logP = np.logaddexp.reduce([k.evaluate(point) for k in self._kernels])
-        return logP - self._logDenominator()
+        return logP - self._logSumW
