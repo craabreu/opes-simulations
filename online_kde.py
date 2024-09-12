@@ -1,4 +1,5 @@
 import functools
+from copy import copy
 from collections import namedtuple
 
 import numpy as np
@@ -7,18 +8,6 @@ COMPRESSION_THRESHOLD = 1.0
 BOUNDED_KERNELS = False
 UNCOMPRESSED_KDE = False
 USE_EXISTING_BANDWIDTHS = True
-
-
-def logsubexp(x, y):
-    """Compute log(exp(x) - exp(y)) in a numerically stable way."""
-    array1 = np.full_like(x, -np.inf)
-    mask1 = y < x
-    array2 = -np.exp(y[mask1] - x[mask1])
-    mask2 = array2 > -1.0
-    array2[mask2] = np.log1p(array2[mask2])
-    array2[~mask2] = -np.inf
-    array1[mask1] = array2 + x[mask1]
-    return array1
 
 
 class CVSpace:
@@ -114,6 +103,16 @@ class Kernel:
         self.fractions = np.array(fractions)
         self.numSamples = numSamples
         self.logHeight = self._computeLogHeight()
+
+    def __copy__(self):
+        return Kernel(
+            self.cvSpace,
+            self.position,
+            self.bandwidth,
+            self.logWeight,
+            self.fractions,
+            self.numSamples,
+        )
 
     def _computeLogHeight(self):
         if np.any(self.bandwidth == 0):
@@ -217,9 +216,9 @@ class OnlineKDE:
                 np.stack([k.position for k in self._kernels]),
                 np.stack([k.bandwidth for k in self._kernels]),
                 np.array([k.logWeight for k in self._kernels]),
+                np.stack([k.fractions for k in self._kernels]),
+                np.array([k.numSamples for k in self._kernels]),
             ]
-            if self._numLabels > 1:
-                kernelData.append(np.stack([k.fractions for k in self._kernels]))
         else:
             kernelData = []
         return {
@@ -249,6 +248,17 @@ class OnlineKDE:
                 np.logaddexp, (k.evaluateOnGrid() for k in self._kernels)
             )
 
+    def __copy__(self):
+        new = self.__class__(self._cvSpace)
+        new._kernels = list(map(copy, self._kernels))
+        new._logSumW = self._logSumW
+        new._logSumWSq = self._logSumWSq
+        new._logPK = copy(self._logPK)
+        new._logPG = copy(self._logPG)
+        new._maskPG = copy(self._maskPG)
+        new._numLabels = self._numLabels
+        return new
+
     def __iadd__(self, other):
         if other._numLabels != self._numLabels:
             raise ValueError("Cannot add KDEs with incompatible numbers of labels")
@@ -272,13 +282,50 @@ class OnlineKDE:
     def __bool__(self):
         return self._numSamples > 0
 
+    @staticmethod
+    def _logsubexp(x, y):
+        """Compute log(exp(x) - exp(y)) in a numerically stable way."""
+        array1 = np.full_like(x, -np.inf)
+        mask1 = y < x
+        array2 = -np.exp(y[mask1] - x[mask1])
+        mask2 = array2 > -1.0
+        array2[mask2] = np.log1p(array2[mask2])
+        array2[~mask2] = -np.inf
+        array1[mask1] = array2 + x[mask1]
+        return array1
+
     def _removeKernels(self, centers, toRemove):
         toRemove = sorted(toRemove, reverse=True)
+        removedKernels = []
         for index in toRemove:
             k = self._kernels.pop(index)
-            self._logPK = logsubexp(self._logPK, k.evaluate(centers))
-            self._logPG = logsubexp(self._logPG, k.evaluateOnGrid())
+            self._logPK = self._logsubexp(self._logPK, k.evaluate(centers))
+            self._logPG = self._logsubexp(self._logPG, k.evaluateOnGrid())
+            removedKernels.append(k)
         self._logPK = np.delete(self._logPK, toRemove)
+        return removedKernels
+
+    def _pushKernel(self, newKernel, enforceFirstMerge=False):
+        centers = np.stack([k.position for k in self._kernels])
+        if USE_EXISTING_BANDWIDTHS:
+            bandwidths = np.stack([k.bandwidth for k in self._kernels])
+        else:
+            bandwidths = newKernel.bandwidth
+        index, minSqDist = newKernel.findNearest(centers, bandwidths)
+        enforceMerge = enforceFirstMerge
+        toRemove = []
+        while (minSqDist <= COMPRESSION_THRESHOLD**2) or enforceMerge:
+            toRemove.append(index)
+            newKernel.merge(self._kernels[index])
+            index, minSqDist = newKernel.findNearest(centers, bandwidths, toRemove)
+            enforceMerge = False
+        self._logPK = np.logaddexp(self._logPK, newKernel.evaluate(centers))
+        self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
+        if toRemove:
+            self._removeKernels(centers, toRemove)
+        self._kernels.append(newKernel)
+        logNewP = [k.evaluate(newKernel.position) for k in self._kernels]
+        self._logPK = np.append(self._logPK, np.logaddexp.reduce(logNewP))
 
     def _addKernel(
         self,
@@ -303,49 +350,23 @@ class OnlineKDE:
             self._maskPG[self._cvSpace.closestNode(position)] = True
             self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
         elif self._kernels:
-            centers = np.stack([k.position for k in self._kernels])
-            if USE_EXISTING_BANDWIDTHS:
-                bandwidths = np.stack([k.bandwidth for k in self._kernels])
-            else:
-                bandwidths = bandwidth
-            index, minSqDist = newKernel.findNearest(centers, bandwidths)
-            toRemove = []
-            while minSqDist <= COMPRESSION_THRESHOLD**2:
-                toRemove.append(index)
-                newKernel.merge(self._kernels[index])
-                index, minSqDist = newKernel.findNearest(centers, bandwidths, toRemove)
-            self._logPK = np.logaddexp(self._logPK, newKernel.evaluate(centers))
-            self._logPG = np.logaddexp(self._logPG, newKernel.evaluateOnGrid())
-            if toRemove:
-                self._removeKernels(centers, toRemove)
-            self._kernels.append(newKernel)
-            logNewP = [k.evaluate(newKernel.position) for k in self._kernels]
-            self._logPK = np.append(self._logPK, np.logaddexp.reduce(logNewP))
+            self._pushKernel(newKernel)
         else:
             self._kernels = [newKernel]
             self._logPG = newKernel.evaluateOnGrid()
             self._logPK = np.array([newKernel.logHeight])
 
-    def copy(self):
-        new = self.__class__(self._cvSpace)
-        new._kernels = self._kernels.copy()
-        new._logSumW = self._logSumW
-        new._logSumWSq = self._logSumWSq
-        new._logPK = self._logPK.copy()
-        new._logPG = self._logPG.copy()
-        new._maskPG = None if self._maskPG is None else self._maskPG.copy()
-        new._numLabels = self._numLabels
-        return new
-
-    def getPrunedCopy(self, threshold=0.0):
-        kde = self.copy()
+    def getSmoothedCopy(self, threshold=0.01):
+        kde = copy(self)
         numSamples = np.array([k.numSamples for k in kde._kernels])
         indices = np.argsort(numSamples)
         accNumSamples = np.cumsum(numSamples[indices])
         numRemovals = np.sum(accNumSamples < accNumSamples[-1] * threshold)
         if numRemovals > 0:
             centers = np.stack([k.position for k in kde._kernels])
-            kde._removeKernels(centers, indices[:numRemovals])
+            removedKernels = kde._removeKernels(centers, indices[:numRemovals])
+            for kernel in removedKernels:
+                self._pushKernel(kernel, enforceFirstMerge=True)
         return kde
 
     def getNumKernels(self):

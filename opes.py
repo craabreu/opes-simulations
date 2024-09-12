@@ -2,6 +2,7 @@ import os
 import pickle
 import re
 import warnings
+from copy import copy
 
 import numpy as np
 import openmm as mm
@@ -248,10 +249,10 @@ class OPES:
                         )
 
         if fileLoaded:
-            self._kde["total"] = self._kde["self"].copy()
-            self._variance["total"] = self._variance["self"].copy()
+            self._kde["total"] = copy(self._kde["self"])
+            self._variance["total"] = copy(self._variance["self"])
             if self.exploreMode and REWEIGHTED_FES:
-                self._kde["total.rw"] = self._kde["self.rw"].copy()
+                self._kde["total.rw"] = copy(self._kde["self.rw"])
             for bias in self._loadedBiases.values():
                 self._kde["total"] += bias.bias["kde"]
                 self._variance["total"] += bias.bias["var"]
@@ -378,7 +379,7 @@ class OPES:
 
     def getRecollectorVariable(self, label):
         """Get the recollector function."""
-        force = self._force.__copy__()
+        force = copy(self._force)
         kde = self._kde["total"]
         force.getTabulatedFunction(0).setFunctionParameters(
             *self._widths,
