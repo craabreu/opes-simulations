@@ -14,7 +14,6 @@ from online_kde import CVSpace, OnlineKDE
 STATS_WINDOW_SIZE = 10
 CORRECTED_OPES_EXPLORE = True
 USE_PDF_OPES_EXPLORE = True
-REWEIGHTED_FES = True
 
 
 class RunningAverage:
@@ -137,8 +136,7 @@ class OPES:
         numLabels = len(self.stateIDFuncs)
         for case in self._cases:
             self._kde[case] = OnlineKDE(self._cvSpace, numLabels)
-            if exploreMode and REWEIGHTED_FES:
-                self._kde[f"{case}.rw"] = OnlineKDE(self._cvSpace, numLabels)
+            self._kde[f"{case}.rw"] = OnlineKDE(self._cvSpace, numLabels)
 
         self._adaptiveVariance = varianceFrequency is not None
         self._interval = varianceFrequency or frequency
@@ -215,9 +213,11 @@ class OPES:
         self._saveIndex += 1
         tempName = os.path.join(self.biasDir, f"temp_{self._id}_{self._saveIndex}.pkl")
         fileName = os.path.join(self.biasDir, f"kde_{self._id}_{self._saveIndex}.pkl")
-        data = {"kde": self._kde["self"], "var": self._variance["self"]}
-        if self.exploreMode and REWEIGHTED_FES:
-            data["kde.rw"] = self._kde["self.rw"]
+        data = {
+            "kde": self._kde["self"],
+            "kde.rw": self._kde["self.rw"],
+            "var": self._variance["self"],
+        }
         with open(tempName, "wb") as file:
             pickle.dump(data, file)
         os.rename(tempName, fileName)
@@ -251,21 +251,20 @@ class OPES:
         if fileLoaded:
             self._kde["total"] = copy(self._kde["self"])
             self._variance["total"] = copy(self._variance["self"])
-            if self.exploreMode and REWEIGHTED_FES:
-                self._kde["total.rw"] = copy(self._kde["self.rw"])
+            self._kde["total.rw"] = copy(self._kde["self.rw"])
             for bias in self._loadedBiases.values():
                 self._kde["total"] += bias.bias["kde"]
                 self._variance["total"] += bias.bias["var"]
-                if self.exploreMode and REWEIGHTED_FES:
-                    self._kde["total.rw"] += bias.bias["kde.rw"]
+                self._kde["total.rw"] += bias.bias["kde.rw"]
 
     def getNumKernels(self):
         """Get the number of kernels in the kernel density estimator."""
-        return self._kde["total"].getNumKernels()
+        kde = self._kde["total" if self.exploreMode else "total.rw"]
+        return kde.getNumKernels()
 
     def getBias(self):
         """Get the OPES bias potential evaluated on the grid."""
-        kde = self._kde["total"]
+        kde = self._kde["total" if self.exploreMode else "total.rw"]
         return self._prefactor * np.logaddexp(
             kde.getLogPDF() - kde.getLogMeanDensity(), self._logEpsilon
         )
@@ -278,22 +277,14 @@ class OPES:
         of collective variables. The values are in kJ/mole. The i'th position along an
         axis corresponds to minValue + i*(maxValue-minValue)/gridWidth.
         """
-        if self.exploreMode and REWEIGHTED_FES:
-            return -self._kbt * self._kde["total.rw"].getLogPDF()
-        freeEnergy = -self._kbt * self._kde["total"].getLogPDF()
-        if not self.exploreMode:
-            return freeEnergy
-        if not CORRECTED_OPES_EXPLORE:
-            if not USE_PDF_OPES_EXPLORE:
-                return -self._kbt * self.getBias() * self._biasFactor / self._prefactor
-            return freeEnergy * self._biasFactor
-        return freeEnergy - self.getBias()
+        return -self._kbt * self._kde["total.rw"].getLogPDF()
 
     def getAverageDensity(self):
         """
         Get the average density of the system as a function of the collective variables.
         """
-        return np.exp(self._kde["total"].getLogMeanDensity())
+        kde = self._kde["total" if self.exploreMode else "total.rw"]
+        return np.exp(kde.getLogMeanDensity())
 
     def getCollectiveVariables(self, simulation):
         """
@@ -320,15 +311,14 @@ class OPES:
             biasEnergy = biasEnergy * unit.kilojoules_per_mole
         if variance is None:
             variance = self._variance["total"].get()
-        betaEnergy = biasEnergy / self._kbt
-        logWeight = 0.0 if self.exploreMode else betaEnergy
-        label = self._lastVisitedState
         for case in self._cases:
-            self._kde[case].update(values, logWeight, variance, label)
-            if self.exploreMode and REWEIGHTED_FES:
-                self._kde[f"{case}.rw"].update(
-                    values, betaEnergy, variance / self._biasFactor, label
-                )
+            self._kde[case].update(values, 0.0, variance, self._lastVisitedState)
+            self._kde[f"{case}.rw"].update(
+                values,
+                biasEnergy / self._kbt,
+                variance / self._biasFactor,
+                self._lastVisitedState,
+            )
 
     def step(self, simulation, steps):
         """

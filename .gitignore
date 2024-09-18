@@ -1,5 +1,6 @@
 *.csv.gz
 *.pkl
+*.png
 !*means.csv.gz
 profile*.csv
 __pycache__
