@@ -97,6 +97,7 @@ class OPES:
         biasFactor=None,
         exploreMode=False,
         stateIDFuncs=(lambda _: True,),
+        bounded=False,
         saveFrequency=None,
         biasDir=None,
     ):
@@ -112,6 +113,7 @@ class OPES:
         self.biasFactor = biasFactor
         self.exploreMode = exploreMode
         self.stateIDFuncs = stateIDFuncs
+        self.bounded = bounded
         self.saveFrequency = saveFrequency
         self.biasDir = biasDir
 
@@ -130,7 +132,7 @@ class OPES:
         self._prefactor = prefactor
         self._logEpsilon = -barrier / prefactor
 
-        self._cvSpace = CVSpace(variables)
+        self._cvSpace = CVSpace(variables, bounded)
         self._cases = ("total",) + ("self",) * bool(saveFrequency)
         self._kde = {}
         numLabels = len(self.stateIDFuncs)

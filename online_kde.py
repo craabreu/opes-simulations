@@ -13,15 +13,23 @@ USE_EXISTING_BANDWIDTHS = True
 class CVSpace:
     """A class to represent the space of collective variables."""
 
-    def __init__(self, variables):
+    def __init__(self, variables, bounded=False):
         self.variables = [
             self._CV(cv.minValue, cv.maxValue, cv.gridWidth, cv.periodic)
             for cv in variables
         ]
+        self.bounded = bounded
         self._periodic = any(cv.periodic for cv in variables)
-        self._grid = [
-            np.linspace(cv.minValue, cv.maxValue, cv.gridWidth) for cv in variables
-        ]
+        self._grid = []
+        for cv in variables:
+            a, b, n = cv.minValue, cv.maxValue, cv.gridWidth
+            points = np.linspace(a, b, n)
+            if bounded and not cv.periodic:
+                left = np.linspace(2 * a - b, a, n)
+                right = np.linspace(b, 2 * b - a, n)
+                left[-1] = right[0] = np.inf
+                points = np.concatenate((points, np.flip(left), np.flip(right)))
+            self._grid.append(points)
         self._widths = np.array([cv.gridWidth for cv in variables])
         self._lbounds = np.array([cv.minValue for cv in variables])
         ubounds = np.array([cv.maxValue for cv in variables])
@@ -34,10 +42,15 @@ class CVSpace:
     _CV = namedtuple("_CV", ["minValue", "maxValue", "gridWidth", "periodic"])
 
     def __getstate__(self):
-        return {"variables": [cv._asdict() for cv in self.variables]}
+        return {
+            "variables": [cv._asdict() for cv in self.variables],
+            "bounded": self.bounded,
+        }
 
     def __setstate__(self, state):
-        self.__init__([self._CV(**kwargs) for kwargs in state["variables"]])
+        self.__init__(
+            [self._CV(**kwargs) for kwargs in state["variables"]], state["bounded"]
+        )
 
     @property
     def gridShape(self):
@@ -86,6 +99,14 @@ class CVSpace:
             indices[self._pdims] %= self._widths[self._pdims]
         indices = np.clip(indices, 0, self._widths - 1)
         return tuple(reversed(indices))
+
+    def foldedGrid(self, values):
+        if self.bounded:
+            for i, cv in enumerate(reversed(self.variables)):
+                if not cv.periodic:
+                    values, left, right = np.array_split(values, 3, axis=i)
+                    values = np.logaddexp(left, np.logaddexp(values, right))
+        return values
 
 
 class Kernel:
@@ -189,7 +210,7 @@ class Kernel:
             self._exponents(dist / sigma)
             for dist, sigma in zip(distances, self.bandwidth)
         ]
-        return (
+        return self.cvSpace.foldedGrid(
             self.logHeight
             + self._logFraction(label)
             + functools.reduce(np.add.outer, reversed(exponents))
