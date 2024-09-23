@@ -3,6 +3,8 @@ from copy import copy
 from collections import namedtuple
 
 import numpy as np
+from scipy import special
+
 
 COMPRESSION_THRESHOLD = 1.0
 BOUNDED_KERNELS = False
@@ -142,8 +144,8 @@ class Kernel:
         d = self.cvSpace.numDimensions
         return self.logWeight - d * const - np.sum(np.log(self.bandwidth))
 
-    def _scaledDistances(self, centers, bandwidths):
-        return self.cvSpace.displacement(self.position, centers) / bandwidths
+    def _scaledDistances(self, points, bandwidths):
+        return self.cvSpace.displacement(self.position, points) / bandwidths
 
     def _logFraction(self, label):
         if label is None:
@@ -193,13 +195,13 @@ class Kernel:
         self.numSamples += other.numSamples
         self.logHeight = self._computeLogHeight()
 
-    def evaluate(self, centers, label=None):
-        """Evaluate the logarithm of the kernel at the given point or centers."""
+    def evaluate(self, points, label=None):
+        """Evaluate the logarithm of the kernel at the given point or points."""
         return (
             self._logFraction(label)
             + self.logHeight
             + np.sum(
-                self._exponents(self._scaledDistances(centers, self.bandwidth)), axis=-1
+                self._exponents(self._scaledDistances(points, self.bandwidth)), axis=-1
             )
         )
 
@@ -215,6 +217,12 @@ class Kernel:
             + self._logFraction(label)
             + functools.reduce(np.add.outer, reversed(exponents))
         )
+
+    def evaluateDirectionsOnGrid(self):
+        """Evaluate the directions of the gradient on a regular grid."""
+        distances = self.cvSpace.gridDistances(self.position)
+        entries = [-dist / sigma**2 for dist, sigma in zip(distances, self.bandwidth)]
+        return np.stack(np.meshgrid(*entries))
 
 
 class OnlineKDE:
@@ -403,6 +411,45 @@ class OnlineKDE:
                 np.logaddexp, (k.evaluateOnGrid(label) for k in self._kernels)
             )
         return logP - self._logSumW
+
+    def getRecollectors(self):
+        """Get the logarithm of the recollector probability of a label on the grid."""
+        logWK = np.stack([k.evaluateOnGrid().T for k in self._kernels], axis=-1)
+        logC = logWK - special.logsumexp(logWK, axis=-1, keepdims=True)
+        fractions = np.stack([k.fractions for k in self._kernels], axis=-1)
+        return special.logsumexp(logC[..., None, :], axis=-1, b=fractions).T
+
+    @staticmethod
+    def _sumexp(*args, **kwargs):
+        logs, signs = special.logsumexp(*args, **kwargs, return_sign=True)
+        return signs * np.exp(logs)
+
+    def getLogPDFGradients(self):
+        """Get the gradient of the probability density functions on the grid."""
+        logWK = np.stack([k.evaluateOnGrid().T for k in self._kernels], axis=-1)
+        logC = logWK - special.logsumexp(logWK, axis=-1, keepdims=True)
+        fractions = np.stack([k.fractions for k in self._kernels], axis=-1)
+        gradLogK = np.stack(
+            [k.evaluateDirectionsOnGrid().T for k in self._kernels], axis=-1
+        )
+        return self._sumexp(
+            logC[..., None, None, :], axis=-1, b=gradLogK[..., None, :] * fractions
+        ).T
+
+    def getRecollectorGradients(self):
+        """Get the gradients of the recollector probabilities on the grid."""
+        logWK = np.stack([k.evaluateOnGrid().T for k in self._kernels], axis=-1)
+        logC = logWK - special.logsumexp(logWK, axis=-1, keepdims=True)
+        fractions = np.stack([k.fractions for k in self._kernels], axis=-1)
+        gradLogK = np.stack(
+            [k.evaluateDirectionsOnGrid().T for k in self._kernels], axis=-1
+        )
+        gradLogC = gradLogK - self._sumexp(
+            logC[..., None, :], axis=-1, b=gradLogK, keepdims=True
+        )
+        return self._sumexp(
+            logC[..., None, None, :], axis=-1, b=gradLogC[..., None, :] * fractions
+        ).T
 
     def getLogMeanDensity(self):
         """Get the logarithm of the mean density."""
