@@ -417,7 +417,7 @@ class OnlineKDE:
         logWK = np.stack([k.evaluateOnGrid().T for k in self._kernels], axis=-1)
         logC = logWK - special.logsumexp(logWK, axis=-1, keepdims=True)
         fractions = np.stack([k.fractions for k in self._kernels], axis=-1)
-        return special.logsumexp(logC[..., None, :], axis=-1, b=fractions).T
+        return np.exp(special.logsumexp(logC[..., None, :], axis=-1, b=fractions).T)
 
     @staticmethod
     def _sumexp(*args, **kwargs):
